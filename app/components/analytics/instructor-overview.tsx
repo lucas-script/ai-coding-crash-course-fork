@@ -3,7 +3,8 @@ import { ArrowDownRight, ArrowUpRight } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { cn, formatPrice } from "~/lib/utils";
 import { RANGES, type Range } from "~/lib/analytics-range";
-import type { InstructorOverview } from "~/services/analyticsService";
+import type { InstructorOverview, OverviewSeries } from "~/services/analyticsService";
+import { TimeSeriesChart } from "~/components/analytics/time-series-chart";
 
 export const RANGE_LABELS: Record<Range, string> = {
   "30d": "30 days",
@@ -99,8 +100,41 @@ export function StatTile({
   );
 }
 
+/** Whole dollars for chart axes, e.g. 499900 → "$4,999". */
+export function formatRevenueAxis(cents: number): string {
+  return `$${Math.round(cents / 100).toLocaleString("en-US")}`;
+}
+
 /**
- * Analytics overview for one instructor: range selector plus headline tiles.
+ * Revenue and enrollments-over-time charts for an `OverviewSeries`. Reusable
+ * for any scope (instructor, single course) that produces one.
+ */
+export function OverviewCharts({ series }: { series: OverviewSeries }) {
+  return (
+    <div className="mt-4 grid gap-4 lg:grid-cols-2">
+      <TimeSeriesChart
+        title="Revenue"
+        points={series.revenue}
+        granularity={series.granularity}
+        formatValue={formatRevenue}
+        formatAxisValue={formatRevenueAxis}
+        emptyMessage="No sales in this period"
+        color="var(--chart-1)"
+      />
+      <TimeSeriesChart
+        title="Enrollments"
+        points={series.enrollments}
+        granularity={series.granularity}
+        formatValue={(n) => n.toLocaleString("en-US")}
+        emptyMessage="No enrollments in this period"
+        color="var(--chart-2)"
+      />
+    </div>
+  );
+}
+
+/**
+ * Analytics overview for one instructor: range selector, headline tiles, and charts.
  * Read-only and self-contained, so instructor and admin routes can both render it.
  */
 export function InstructorOverviewPanel({
@@ -128,7 +162,14 @@ export function InstructorOverviewPanel({
           change={previous ? percentChange(totals.revenue, previous.revenue) : undefined}
           comparisonLabel={comparisonLabel}
         />
+        <StatTile
+          label="New enrollments"
+          value={totals.enrollments.toLocaleString("en-US")}
+          change={previous ? percentChange(totals.enrollments, previous.enrollments) : undefined}
+          comparisonLabel={comparisonLabel}
+        />
       </div>
+      <OverviewCharts series={overview.series} />
     </section>
   );
 }
