@@ -12,12 +12,8 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import {
-  getCourseAnalytics,
-  getCourseFunnel,
-  getInstructorOverview,
-  parseRange,
-} from "./analyticsService";
+import { getCourseAnalytics, getCourseFunnel, getInstructorOverview } from "./analyticsService";
+import { parseRange } from "~/lib/analytics-range";
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
 
@@ -389,7 +385,7 @@ describe("analyticsService", () => {
       purchase(1000, "2026-06-01T00:00:00.000Z", other.id);
       purchase(20, "2026-05-01T00:00:00.000Z"); // previous 30d
 
-      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW)!;
 
       expect(analytics.totals.revenue).toBe(100);
       expect(analytics.previous?.revenue).toBe(20);
@@ -416,7 +412,7 @@ describe("analyticsService", () => {
       enroll(user(schema.UserRole.Admin).id, "2026-06-01T00:00:00.000Z"); // admin — excluded
       enroll(user(schema.UserRole.Student).id, "2026-06-01T00:00:00.000Z", null, otherCourse().id);
 
-      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW)!;
 
       expect(analytics.totals.enrollments).toBe(1);
       expect(analytics.previous?.enrollments).toBe(1);
@@ -425,7 +421,7 @@ describe("analyticsService", () => {
     it("counts another instructor enrolled as a student", () => {
       enroll(user(schema.UserRole.Instructor).id);
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.enrollments).toBe(1);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.totals.enrollments).toBe(1);
     });
 
     it("completion rate is completed ÷ all counted enrollments, all-time and ignoring the range", () => {
@@ -437,8 +433,8 @@ describe("analyticsService", () => {
       enroll(base.instructor.id, "2026-06-01T00:00:00.000Z", "2026-06-02T00:00:00.000Z");
       enroll(user(schema.UserRole.Admin).id, "2026-06-01T00:00:00.000Z", "2026-06-02T00:00:00.000Z");
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.completionRate).toBe(0.5);
-      expect(getCourseAnalytics(base.course.id, "all", NOW).totals.completionRate).toBe(0.5);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.totals.completionRate).toBe(0.5);
+      expect(getCourseAnalytics(base.course.id, "all", NOW)!.totals.completionRate).toBe(0.5);
     });
 
     function lessonIn(courseId: number) {
@@ -475,7 +471,7 @@ describe("analyticsService", () => {
       progress(admin.id, lesson.id, schema.LessonProgressStatus.Completed); // excluded
       progress(base.instructor.id, lesson.id, schema.LessonProgressStatus.Completed); // excluded
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.activationRate).toBe(0.5);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.totals.activationRate).toBe(0.5);
     });
 
     it("rating is the all-time average of that course's ratings", () => {
@@ -486,11 +482,11 @@ describe("analyticsService", () => {
       rate(user(schema.UserRole.Student).id, 4);
       rate(user(schema.UserRole.Student).id, 2, other.id);
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.rating).toBe(4.5);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.totals.rating).toBe(4.5);
     });
 
     it("returns zeros and nulls when the course has no data", () => {
-      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW)!;
       expect(analytics.totals).toEqual({
         revenue: 0,
         enrollments: 0,
@@ -502,7 +498,30 @@ describe("analyticsService", () => {
     });
 
     it("has no previous window for all time", () => {
-      expect(getCourseAnalytics(base.course.id, "all", NOW).previous).toBeNull();
+      expect(getCourseAnalytics(base.course.id, "all", NOW)!.previous).toBeNull();
+    });
+
+    it("returns no analytics for a Draft course, even with sales and enrollments", () => {
+      testDb
+        .update(schema.courses)
+        .set({ status: schema.CourseStatus.Draft })
+        .where(eq(schema.courses.id, base.course.id))
+        .run();
+      purchase(100, "2026-06-01T00:00:00.000Z");
+      enroll(student("drafty").id, "2026-06-01T00:00:00.000Z");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)).toBeNull();
+    });
+
+    it("still returns analytics for an Archived course", () => {
+      testDb
+        .update(schema.courses)
+        .set({ status: schema.CourseStatus.Archived })
+        .where(eq(schema.courses.id, base.course.id))
+        .run();
+      purchase(100, "2026-06-01T00:00:00.000Z");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)?.totals.revenue).toBe(100);
     });
   });
 
@@ -534,7 +553,7 @@ describe("analyticsService", () => {
       enroll(student("a").id, "2026-06-12T00:00:00.000Z");
       enroll(student("b").id, "2026-06-12T00:00:00.000Z", other.id);
 
-      const { series } = getCourseAnalytics(base.course.id, "30d", NOW);
+      const { series } = getCourseAnalytics(base.course.id, "30d", NOW)!;
 
       expect(series.granularity).toBe("day");
       expect(series.revenue).toHaveLength(31);
@@ -549,7 +568,7 @@ describe("analyticsService", () => {
       purchase(500, "2025-01-10T00:00:00.000Z", other.id);
       purchase(4999, "2026-04-20T00:00:00.000Z");
 
-      const { series } = getCourseAnalytics(base.course.id, "all", NOW);
+      const { series } = getCourseAnalytics(base.course.id, "all", NOW)!;
 
       expect(series.granularity).toBe("month");
       expect(series.revenue.map((p) => p.bucket)).toEqual(["2026-04-01", "2026-05-01", "2026-06-01"]);
@@ -560,7 +579,7 @@ describe("analyticsService", () => {
     it("is empty for all time when the course has no sales or enrollments", () => {
       purchase(500, "2026-06-01T00:00:00.000Z", otherCourse().id);
 
-      const { series } = getCourseAnalytics(base.course.id, "all", NOW);
+      const { series } = getCourseAnalytics(base.course.id, "all", NOW)!;
 
       expect(series.revenue).toEqual([]);
       expect(series.enrollments).toEqual([]);
@@ -571,7 +590,7 @@ describe("analyticsService", () => {
       enroll(student("admin", schema.UserRole.Admin).id, "2026-06-10T00:00:00.000Z");
       enroll(student("c").id, "2026-06-10T00:00:00.000Z");
 
-      const { series } = getCourseAnalytics(base.course.id, "30d", NOW);
+      const { series } = getCourseAnalytics(base.course.id, "30d", NOW)!;
 
       expect(nonZero(series.enrollments)).toEqual([["2026-06-10", 1]]);
     });
@@ -737,7 +756,7 @@ describe("analyticsService", () => {
       const students = enrollStudents(1);
       funnelOf(students, [[1]]);
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).funnel).toEqual(
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.funnel).toEqual(
         getCourseFunnel(base.course.id)
       );
     });
@@ -883,7 +902,7 @@ describe("analyticsService", () => {
       sale(1000, "IN");
       sale(1000, "IN");
 
-      const rows = getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry;
+      const rows = getCourseAnalytics(base.course.id, "30d", NOW)!.revenueByCountry;
 
       expect(rows.map((r) => [r.country, r.revenue, r.purchases])).toEqual([
         ["IN", 3000, 3],
@@ -920,7 +939,7 @@ describe("analyticsService", () => {
       teamSale(3, 0, "US"); // team — 3000, above list price, not full-price individual
       sale(1200, "DE"); // paid above list price — full price
 
-      const rows = getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry;
+      const rows = getCourseAnalytics(base.course.id, "30d", NOW)!.revenueByCountry;
 
       expect(rows).toEqual([
         {
@@ -947,14 +966,14 @@ describe("analyticsService", () => {
       sale(1000, "US");
       sale(1000, "FR", "2026-01-01T00:00:00.000Z");
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry.map((r) => r.country)).toEqual(["US"]);
-      expect(getCourseAnalytics(base.course.id, "all", NOW).revenueByCountry).toHaveLength(2);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.revenueByCountry.map((r) => r.country)).toEqual(["US"]);
+      expect(getCourseAnalytics(base.course.id, "all", NOW)!.revenueByCountry).toHaveLength(2);
     });
 
     it("is empty with no purchases in the range", () => {
       sale(1000, "US", "2026-01-01T00:00:00.000Z");
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry).toEqual([]);
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.revenueByCountry).toEqual([]);
     });
 
     it("counts team seats sold and redeemed for team purchases made within the range", () => {
@@ -963,12 +982,12 @@ describe("analyticsService", () => {
       teamSale(4, 4, "US", "2026-01-01T00:00:00.000Z"); // outside 30d
       sale(1000, "US"); // individual — no seats
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).teamSeats).toEqual({
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.teamSeats).toEqual({
         purchases: 2,
         sold: 13,
         redeemed: 7,
       });
-      expect(getCourseAnalytics(base.course.id, "all", NOW).teamSeats).toEqual({
+      expect(getCourseAnalytics(base.course.id, "all", NOW)!.teamSeats).toEqual({
         purchases: 3,
         sold: 17,
         redeemed: 11,
@@ -978,7 +997,7 @@ describe("analyticsService", () => {
     it("has zero team seats with no team purchases", () => {
       sale(1000, "US");
 
-      expect(getCourseAnalytics(base.course.id, "30d", NOW).teamSeats).toEqual({
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)!.teamSeats).toEqual({
         purchases: 0,
         sold: 0,
         redeemed: 0,

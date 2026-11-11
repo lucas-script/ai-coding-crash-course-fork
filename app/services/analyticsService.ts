@@ -28,10 +28,6 @@ import {
   type Window,
 } from "~/lib/analytics-range";
 
-export { RANGES, DEFAULT_RANGE, parseRange, getRangeWindow, getPreviousWindow } from "~/lib/analytics-range";
-export type { Range, Window } from "~/lib/analytics-range";
-export type { Granularity, SeriesPoint } from "~/lib/analytics-range";
-
 /** SQL condition placing an ISO-text timestamp column inside a window. */
 function inWindow(column: SQLiteColumn, window: Window): SQL | undefined {
   return and(
@@ -51,13 +47,13 @@ function instructorAnalyticsCourses(instructorId: number): SQL | undefined {
   );
 }
 
-/** Gross revenue (cents) for an instructor's courses within a window. */
-function revenueInWindow(instructorId: number, window: Window): number {
+/** Gross revenue (cents) for courses matching `courseFilter` within a window. */
+function revenueInWindow(courseFilter: SQL | undefined, window: Window): number {
   const row = db
     .select({ revenue: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)` })
     .from(purchases)
     .innerJoin(courses, eq(purchases.courseId, courses.id))
-    .where(and(instructorAnalyticsCourses(instructorId), inWindow(purchases.createdAt, window)))
+    .where(and(courseFilter, inWindow(purchases.createdAt, window)))
     .get();
   return row?.revenue ?? 0;
 }
@@ -82,6 +78,16 @@ function enrollmentsInWindow(courseFilter: SQL | undefined, window: Window): num
     .where(and(courseFilter, countedEnrollment, inWindow(enrollments.enrolledAt, window)))
     .get();
   return row?.n ?? 0;
+}
+
+export type OverviewTotals = { revenue: number; enrollments: number };
+
+/** Revenue and counted enrollments for courses matching `courseFilter` within a window. */
+function totalsInWindow(courseFilter: SQL | undefined, window: Window): OverviewTotals {
+  return {
+    revenue: revenueInWindow(courseFilter, window),
+    enrollments: enrollmentsInWindow(courseFilter, window),
+  };
 }
 
 type TimedValue = { at: string; value: number };
@@ -140,8 +146,6 @@ function seriesFor(courseFilter: SQL | undefined, range: Range, now: Date): Over
   };
 }
 
-export type OverviewTotals = { revenue: number; enrollments: number };
-
 export type InstructorOverview = {
   totals: OverviewTotals;
   /** Same metrics for the preceding equal-length window; null for "all". */
@@ -166,15 +170,13 @@ export function getInstructorOverview(
   const window = getRangeWindow(range, now);
   const previousWindow = getPreviousWindow(range, now);
   const courseFilter = instructorAnalyticsCourses(instructorId);
-  const totalsIn = (w: Window): OverviewTotals => ({
-    revenue: revenueInWindow(instructorId, w),
-    enrollments: enrollmentsInWindow(courseFilter, w),
-  });
+  const coursePerformance = getCoursePerformance(instructorId, window);
   return {
-    totals: totalsIn(window),
-    previous: previousWindow ? totalsIn(previousWindow) : null,
+    totals: totalsInWindow(courseFilter, window),
+    previous: previousWindow ? totalsInWindow(courseFilter, previousWindow) : null,
     series: seriesFor(courseFilter, range, now),
-    ...performanceAndEngagement(instructorId, range, now),
+    courses: coursePerformance,
+    engagement: overviewEngagement(instructorId, coursePerformance),
   };
 }
 
@@ -183,16 +185,6 @@ export function getInstructorOverview(
 /** SQL condition selecting one course (by id); pair with `courses`-joined helpers. */
 function singleCourse(courseId: number): SQL {
   return eq(courses.id, courseId);
-}
-
-/** Gross revenue (cents) for one course within a window. */
-function courseRevenueInWindow(courseId: number, window: Window): number {
-  const row = db
-    .select({ revenue: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)` })
-    .from(purchases)
-    .where(and(eq(purchases.courseId, courseId), inWindow(purchases.createdAt, window)))
-    .get();
-  return row?.revenue ?? 0;
 }
 
 /** All-time engagement for one course. Rates are 0–1, null with no counted enrollments. */
@@ -268,18 +260,6 @@ export type CourseFunnel = {
   biggestDropLessonId: number | null;
 };
 
-/** All-time counted enrollments in one course. */
-function countedEnrollmentsAllTime(courseId: number): number {
-  const row = db
-    .select({ n: count() })
-    .from(enrollments)
-    .innerJoin(courses, eq(enrollments.courseId, courses.id))
-    .innerJoin(users, eq(enrollments.userId, users.id))
-    .where(and(singleCourse(courseId), countedEnrollment))
-    .get();
-  return row?.n ?? 0;
-}
-
 /** Lesson id → number of counted enrollees of the course who completed it. */
 function lessonCompletions(courseId: number): Map<number, number> {
   const rows = db
@@ -303,8 +283,8 @@ function lessonCompletions(courseId: number): Map<number, number> {
  * enrollments that completed it. The denominator is always all enrollments,
  * even for lessons added after students enrolled.
  */
-export function getCourseFunnel(courseId: number): CourseFunnel {
-  const total = countedEnrollmentsAllTime(courseId);
+export function getCourseFunnel(courseId: number, now: Date = new Date()): CourseFunnel {
+  const total = enrollmentsInWindow(singleCourse(courseId), getRangeWindow("all", now));
   const completions = lessonCompletions(courseId);
   const rows = db
     .select({
@@ -471,22 +451,31 @@ export type CourseAnalytics = {
   funnel: CourseFunnel;
 } & CourseSalesBreakdown;
 
+/** True when the course exists and counts toward analytics (Published or Archived). */
+function isAnalyticsCourse(courseId: number): boolean {
+  const course = db
+    .select({ id: courses.id })
+    .from(courses)
+    .where(and(singleCourse(courseId), inArray(courses.status, ANALYTICS_COURSE_STATUSES)))
+    .get();
+  return course !== undefined;
+}
+
 /**
  * Analytics for one course. Revenue and enrollments cover `range` ending at
- * `now`; completion, activation, and rating are all-time.
+ * `now`; completion, activation, and rating are all-time. Null for a Draft
+ * (or unknown) course: Drafts are excluded from analytics everywhere.
  */
-export function getCourseAnalytics(courseId: number, range: Range, now: Date): CourseAnalytics {
+export function getCourseAnalytics(courseId: number, range: Range, now: Date): CourseAnalytics | null {
+  if (!isAnalyticsCourse(courseId)) return null;
   const window = getRangeWindow(range, now);
   const previousWindow = getPreviousWindow(range, now);
-  const windowed = (w: Window): OverviewTotals => ({
-    revenue: courseRevenueInWindow(courseId, w),
-    enrollments: enrollmentsInWindow(singleCourse(courseId), w),
-  });
+  const courseFilter = singleCourse(courseId);
   return {
-    totals: { ...windowed(window), ...getCourseEngagement(courseId) },
-    previous: previousWindow ? windowed(previousWindow) : null,
-    series: seriesFor(singleCourse(courseId), range, now),
-    funnel: getCourseFunnel(courseId),
+    totals: { ...totalsInWindow(courseFilter, window), ...getCourseEngagement(courseId) },
+    previous: previousWindow ? totalsInWindow(courseFilter, previousWindow) : null,
+    series: seriesFor(courseFilter, range, now),
+    funnel: getCourseFunnel(courseId, now),
     ...courseSalesBreakdown(courseId, window),
   };
 }
@@ -510,11 +499,10 @@ export type CoursePerformanceRow = {
 
 /**
  * Per-course figures for an instructor's Published and Archived courses,
- * ordered by title. Revenue and enrollments cover `range`; completion and
+ * ordered by title. Revenue and enrollments cover `window`; completion and
  * rating are all-time (see `getCourseEngagement`).
  */
-function getCoursePerformance(instructorId: number, range: Range, now: Date): CoursePerformanceRow[] {
-  const window = getRangeWindow(range, now);
+function getCoursePerformance(instructorId: number, window: Window): CoursePerformanceRow[] {
   const rows = db
     .select({ courseId: courses.id, title: courses.title, status: courses.status })
     .from(courses)
@@ -525,8 +513,7 @@ function getCoursePerformance(instructorId: number, range: Range, now: Date): Co
     const { completionRate, rating } = getCourseEngagement(course.courseId);
     return {
       ...course,
-      revenue: courseRevenueInWindow(course.courseId, window),
-      enrollments: enrollmentsInWindow(singleCourse(course.courseId), window),
+      ...totalsInWindow(singleCourse(course.courseId), window),
       completionRate,
       rating,
     };
@@ -549,18 +536,11 @@ function meanOfPresent(values: (number | null)[]): number | null {
   return present.length ? present.reduce((a, b) => a + b, 0) / present.length : null;
 }
 
-function performanceAndEngagement(
-  instructorId: number,
-  range: Range,
-  now: Date
-): Pick<InstructorOverview, "courses" | "engagement"> {
-  const rows = getCoursePerformance(instructorId, range, now);
+/** Overview engagement headlines, averaged over the instructor's course performance rows. */
+function overviewEngagement(instructorId: number, rows: CoursePerformanceRow[]): OverviewEngagement {
   return {
-    courses: rows,
-    engagement: {
-      averageCompletion: meanOfPresent(rows.map((r) => r.completionRate)),
-      averageRating: meanOfPresent(rows.map((r) => r.rating)),
-      unansweredQuestions: getUnansweredQuestions(instructorId).length,
-    },
+    averageCompletion: meanOfPresent(rows.map((r) => r.completionRate)),
+    averageRating: meanOfPresent(rows.map((r) => r.rating)),
+    unansweredQuestions: getUnansweredQuestions(instructorId).length,
   };
 }

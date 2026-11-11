@@ -1,17 +1,21 @@
-import { Link, data, isRouteErrorResponse } from "react-router";
-import { AlertTriangle, ArrowLeft } from "lucide-react";
+import { Link, data } from "react-router";
+import { ArrowLeft } from "lucide-react";
 import type { Route } from "./+types/instructor.$courseId.analytics";
 import { getCourseById } from "~/services/courseService";
-import { getCourseAnalytics, parseRange } from "~/services/analyticsService";
-import { requireStaff } from "~/lib/access.server";
+import { getCourseAnalytics } from "~/services/analyticsService";
+import { parseRange } from "~/lib/analytics-range";
+import { requireInstructorOrAdmin, requireStaff } from "~/lib/access.server";
 import { Button } from "~/components/ui/button";
+import { Card, CardContent } from "~/components/ui/card";
 import {
   CourseCharts,
   CourseEngagementStats,
   CourseRangeStats,
+  CourseRevenueByCountry,
+  CourseTeamSeats,
 } from "~/components/analytics/course-analytics";
 import { CourseFunnelSection } from "~/components/analytics/course-funnel";
-import { CourseRevenueByCountry, CourseTeamSeats } from "~/components/analytics/course-analytics";
+import { RouteErrorPanel } from "~/components/route-error";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course";
@@ -22,6 +26,10 @@ export function meta({ loaderData }: Route.MetaArgs) {
 }
 
 export async function loader({ params, request }: Route.LoaderArgs) {
+  // Reject signed-out users (401) and non-staff roles (403) before touching the
+  // course, so they can't probe which course ids exist.
+  await requireInstructorOrAdmin(request);
+
   const courseId = parseInt(params.courseId, 10);
   if (isNaN(courseId)) {
     throw data("Invalid course ID.", { status: 400 });
@@ -32,10 +40,11 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  // The course's own instructor or any admin: 401 signed out, 403 otherwise.
+  // Instructors may only see their own courses; admins see any.
   await requireStaff(request, courseId);
 
   const range = parseRange(new URL(request.url).searchParams.get("range"));
+  // Null for a Draft course: Drafts are excluded from analytics.
   const analytics = getCourseAnalytics(courseId, range, new Date());
 
   return { course: { id: course.id, title: course.title }, range, analytics };
@@ -68,50 +77,39 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
 
       <h1 className="mb-8 text-3xl font-bold">{course.title}: Analytics</h1>
 
-      {/* Sections stack here; later tickets add charts, funnel, countries, seats. */}
-      <CourseRangeStats analytics={analytics} range={range} />
-      <CourseCharts analytics={analytics} range={range} />
-      <CourseEngagementStats analytics={analytics} />
-      <CourseFunnelSection funnel={analytics.funnel} />
-      <CourseRevenueByCountry analytics={analytics} range={range} />
-      <CourseTeamSeats analytics={analytics} range={range} />
+      {analytics ? (
+        <>
+          <CourseRangeStats analytics={analytics} range={range} />
+          <CourseCharts analytics={analytics} range={range} />
+          <CourseEngagementStats analytics={analytics} />
+          <CourseFunnelSection funnel={analytics.funnel} />
+          <CourseRevenueByCountry analytics={analytics} range={range} />
+          <CourseTeamSeats analytics={analytics} range={range} />
+        </>
+      ) : (
+        <Card>
+          <CardContent className="py-10 text-center text-muted-foreground">
+            Draft courses aren't included in analytics; publish to start tracking.
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading course analytics.";
-
-  if (isRouteErrorResponse(error)) {
-    if (error.status === 401) {
-      title = "Sign in required";
-      message = typeof error.data === "string" ? error.data : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Access denied";
-      message =
-        typeof error.data === "string"
-          ? error.data
-          : "You don't have permission to view this course's analytics.";
-    } else if (error.status === 404) {
-      title = "Course not found";
-      message = typeof error.data === "string" ? error.data : "This course doesn't exist.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
-  }
-
   return (
-    <div className="flex min-h-[50vh] items-center justify-center p-6">
-      <div className="text-center">
-        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
-        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
-        <p className="mb-6 text-muted-foreground">{message}</p>
-        <Link to="/instructor">
-          <Button variant="outline">Back to My Courses</Button>
-        </Link>
-      </div>
-    </div>
+    <RouteErrorPanel
+      error={error}
+      fallback="An unexpected error occurred while loading course analytics."
+      copy={{
+        403: { message: "You don't have permission to view this course's analytics." },
+        404: { title: "Course not found", message: "This course doesn't exist." },
+      }}
+    >
+      <Link to="/instructor">
+        <Button variant="outline">Back to My Courses</Button>
+      </Link>
+    </RouteErrorPanel>
   );
 }

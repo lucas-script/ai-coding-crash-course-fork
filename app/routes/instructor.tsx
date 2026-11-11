@@ -11,7 +11,8 @@ import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-reac
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
-import { getInstructorOverview, parseRange } from "~/services/analyticsService";
+import { getInstructorOverview } from "~/services/analyticsService";
+import { parseRange } from "~/lib/analytics-range";
 import { InstructorOverviewPanel } from "~/components/analytics/instructor-overview";
 
 export function meta() {
