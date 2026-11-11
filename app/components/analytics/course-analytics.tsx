@@ -8,17 +8,11 @@ import {
   StatTile,
   formatRevenue,
   percentChange,
+  formatRate,
+  formatRating,
 } from "~/components/analytics/instructor-overview";
 
-/** A 0–1 rate as a whole percent, or "—" when there is nothing to divide by. */
-export function formatRate(rate: number | null): string {
-  return rate === null ? "—" : `${Math.round(rate * 100)}%`;
-}
-
-/** Average stars to one decimal, or "—" with no ratings. */
-export function formatRating(rating: number | null): string {
-  return rating === null ? "—" : `${rating.toFixed(1)} / 5`;
-}
+export { formatRate, formatRating };
 
 /**
  * A titled block on the course analytics page. Later sections (funnel,

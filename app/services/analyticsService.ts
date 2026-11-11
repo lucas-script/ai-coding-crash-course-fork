@@ -1,6 +1,7 @@
 import { and, count, countDistinct, eq, gt, inArray, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
+import { getUnansweredQuestions } from "~/services/commentService";
 import {
   CourseStatus,
   LessonProgressStatus,
@@ -145,6 +146,9 @@ export type InstructorOverview = {
   /** Same metrics for the preceding equal-length window; null for "all". */
   previous: OverviewTotals | null;
   series: OverviewSeries;
+  /** One row per Published/Archived course, by title. */
+  courses: CoursePerformanceRow[];
+  engagement: OverviewEngagement;
 };
 
 /**
@@ -169,6 +173,7 @@ export function getInstructorOverview(
     totals: totalsIn(window),
     previous: previousWindow ? totalsIn(previousWindow) : null,
     series: seriesFor(courseFilter, range, now),
+    ...performanceAndEngagement(instructorId, range, now),
   };
 }
 
@@ -371,5 +376,79 @@ export function getCourseAnalytics(courseId: number, range: Range, now: Date): C
     previous: previousWindow ? windowed(previousWindow) : null,
     series: seriesFor(singleCourse(courseId), range, now),
     funnel: getCourseFunnel(courseId),
+  };
+}
+
+// ─── Overview course performance & engagement headlines ───
+
+/** One course in the overview's performance table. */
+export type CoursePerformanceRow = {
+  courseId: number;
+  title: string;
+  status: CourseStatus;
+  /** Gross cents within the range. */
+  revenue: number;
+  /** Counted enrollments within the range. */
+  enrollments: number;
+  /** All-time, 0–1; null with no counted enrollments. */
+  completionRate: number | null;
+  /** All-time average stars; null with no ratings. */
+  rating: number | null;
+};
+
+/**
+ * Per-course figures for an instructor's Published and Archived courses,
+ * ordered by title. Revenue and enrollments cover `range`; completion and
+ * rating are all-time (see `getCourseEngagement`).
+ */
+function getCoursePerformance(instructorId: number, range: Range, now: Date): CoursePerformanceRow[] {
+  const window = getRangeWindow(range, now);
+  const rows = db
+    .select({ courseId: courses.id, title: courses.title, status: courses.status })
+    .from(courses)
+    .where(instructorAnalyticsCourses(instructorId))
+    .orderBy(courses.title)
+    .all();
+  return rows.map((course) => {
+    const { completionRate, rating } = getCourseEngagement(course.courseId);
+    return {
+      ...course,
+      revenue: courseRevenueInWindow(course.courseId, window),
+      enrollments: enrollmentsInWindow(singleCourse(course.courseId), window),
+      completionRate,
+      rating,
+    };
+  });
+}
+
+/** All-time engagement headlines for the overview. */
+export type OverviewEngagement = {
+  /** Mean of per-course completion rates over courses with enrollments; null if none. */
+  averageCompletion: number | null;
+  /** Mean of per-course average ratings over rated courses; null if none. */
+  averageRating: number | null;
+  /** Questions in the instructor's queue (same rule as the questions page). */
+  unansweredQuestions: number;
+};
+
+/** Mean of the non-null values, or null when there are none. */
+function meanOfPresent(values: (number | null)[]): number | null {
+  const present = values.filter((v): v is number => v !== null);
+  return present.length ? present.reduce((a, b) => a + b, 0) / present.length : null;
+}
+
+function performanceAndEngagement(
+  instructorId: number,
+  range: Range,
+  now: Date
+): Pick<InstructorOverview, "courses" | "engagement"> {
+  const rows = getCoursePerformance(instructorId, range, now);
+  return {
+    courses: rows,
+    engagement: {
+      averageCompletion: meanOfPresent(rows.map((r) => r.completionRate)),
+      averageRating: meanOfPresent(rows.map((r) => r.rating)),
+      unansweredQuestions: getUnansweredQuestions(instructorId).length,
+    },
   };
 }

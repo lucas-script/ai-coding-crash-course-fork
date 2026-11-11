@@ -741,4 +741,119 @@ describe("analyticsService", () => {
       );
     });
   });
+
+  // ─── Overview course performance & engagement headlines (ticket #11) ───
+
+  describe("getInstructorOverview — course performance", () => {
+    function course(title: string, status = schema.CourseStatus.Published, instructorId = base.instructor.id) {
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title,
+          slug: `${title}-${Math.random()}`,
+          description: "",
+          salesCopy: "",
+          instructorId,
+          categoryId: base.category.id,
+          status,
+        })
+        .returning()
+        .get();
+    }
+
+    function enrollAt(courseId: number, enrolledAt: string, completedAt: string | null = null) {
+      const u = student(`s-${Math.random()}`);
+      testDb.insert(schema.enrollments).values({ userId: u.id, courseId, enrolledAt, completedAt }).run();
+      return u;
+    }
+
+    function rate(courseId: number, rating: number) {
+      const u = student(`r-${Math.random()}`);
+      testDb.insert(schema.courseRatings).values({ userId: u.id, courseId, rating }).run();
+    }
+
+    it("lists each Published and Archived course with ranged revenue and enrollments and all-time completion and rating", () => {
+      const archived = course("Archived Course", schema.CourseStatus.Archived);
+      course("Draft Course", schema.CourseStatus.Draft);
+      purchase(4999, "2026-06-10T00:00:00.000Z");
+      purchase(1000, "2026-01-01T00:00:00.000Z"); // outside 30d
+      purchase(2999, "2026-06-01T00:00:00.000Z", archived.id);
+      enrollAt(base.course.id, "2026-06-10T00:00:00.000Z", "2026-06-12T00:00:00.000Z");
+      enrollAt(base.course.id, "2025-01-01T00:00:00.000Z"); // outside 30d, still counts for completion
+      rate(base.course.id, 5);
+      rate(base.course.id, 4);
+
+      const rows = getInstructorOverview(base.instructor.id, "30d", NOW).courses;
+
+      expect(rows).toEqual([
+        {
+          courseId: archived.id,
+          title: "Archived Course",
+          status: schema.CourseStatus.Archived,
+          revenue: 2999,
+          enrollments: 0,
+          completionRate: null,
+          rating: null,
+        },
+        {
+          courseId: base.course.id,
+          title: "Test Course",
+          status: schema.CourseStatus.Published,
+          revenue: 4999,
+          enrollments: 1,
+          completionRate: 0.5,
+          rating: 4.5,
+        },
+      ]);
+    });
+
+    it("is empty for an instructor whose only course is a draft, and omits other instructors' courses", () => {
+      const other = student("Other Instructor", schema.UserRole.Instructor);
+      course("Theirs", schema.CourseStatus.Published, other.id);
+      testDb.update(schema.courses).set({ status: schema.CourseStatus.Draft }).run();
+      course("Theirs Too", schema.CourseStatus.Published, other.id);
+
+      expect(getInstructorOverview(base.instructor.id, "30d", NOW).courses).toEqual([]);
+      expect(getInstructorOverview(other.id, "30d", NOW).courses.map((r) => r.title)).toEqual(["Theirs Too"]);
+    });
+
+    it("averages completion and rating over courses that have data, all-time", () => {
+      const second = course("Second");
+      course("No Data");
+      enrollAt(base.course.id, "2020-01-01T00:00:00.000Z", "2020-02-01T00:00:00.000Z"); // 100%
+      enrollAt(second.id, "2026-06-01T00:00:00.000Z"); // 0%, 0.5 avg
+      rate(base.course.id, 5);
+      rate(base.course.id, 3); // course avg 4
+      rate(second.id, 2); // avg of averages → 3
+
+      const { engagement } = getInstructorOverview(base.instructor.id, "30d", NOW);
+
+      expect(engagement.averageCompletion).toBe(0.5);
+      expect(engagement.averageRating).toBe(3);
+    });
+
+    it("averages are null when no course has data", () => {
+      const { engagement } = getInstructorOverview(base.instructor.id, "30d", NOW);
+
+      expect(engagement.averageCompletion).toBeNull();
+      expect(engagement.averageRating).toBeNull();
+    });
+
+    it("counts the instructor's unanswered questions, matching the questions queue", () => {
+      const draft = course("Draft", schema.CourseStatus.Draft);
+      const lessonOf = (courseId: number) => {
+        const mod = testDb.insert(schema.modules).values({ courseId, title: "M", position: 1 }).returning().get();
+        return testDb.insert(schema.lessons).values({ moduleId: mod.id, title: "L", position: 1 }).returning().get();
+      };
+      const ask = (lessonId: number, userId = base.user.id, parentId: number | null = null) =>
+        testDb.insert(schema.comments).values({ lessonId, userId, parentId, body: "?" }).returning().get();
+      const lesson = lessonOf(base.course.id);
+      ask(lesson.id);
+      ask(lessonOf(draft.id).id); // the queue does not filter by course status
+      const answered = ask(lesson.id);
+      ask(lesson.id, base.instructor.id, answered.id);
+
+      expect(getInstructorOverview(base.instructor.id, "30d", NOW).engagement.unansweredQuestions).toBe(2);
+    });
+  });
 });
