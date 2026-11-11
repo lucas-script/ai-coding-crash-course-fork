@@ -1,4 +1,4 @@
-import { and, count, eq, gt, inArray, lte, ne, sql, type SQL } from "drizzle-orm";
+import { and, count, countDistinct, eq, gt, inArray, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
 import {
@@ -239,10 +239,118 @@ export function getCourseEngagement(courseId: number): CourseEngagement {
   };
 }
 
+// ─── Lesson drop-off funnel (#8) ───
+
+export type FunnelLesson = {
+  id: number;
+  title: string;
+  /** Share (0–1) of all counted enrollments that completed this lesson; null with none. */
+  completionRate: number | null;
+  /** Percentage-point decrease (0–1) from the previous lesson; negative for a rise, null for the first lesson or with no enrollments. */
+  dropFromPrevious: number | null;
+  /** True for exactly one lesson: the largest drop (earliest on a tie), when any drop exists. */
+  isBiggestDrop: boolean;
+};
+
+export type FunnelModule = { id: number; title: string; lessons: FunnelLesson[] };
+
+export type CourseFunnel = {
+  /** All-time counted enrollments (instructor and admins excluded): the denominator. */
+  enrollments: number;
+  modules: FunnelModule[];
+  /** Lesson with the largest decrease vs its previous lesson; null when nothing drops. */
+  biggestDropLessonId: number | null;
+};
+
+/** All-time counted enrollments in one course. */
+function countedEnrollmentsAllTime(courseId: number): number {
+  const row = db
+    .select({ n: count() })
+    .from(enrollments)
+    .innerJoin(courses, eq(enrollments.courseId, courses.id))
+    .innerJoin(users, eq(enrollments.userId, users.id))
+    .where(and(singleCourse(courseId), countedEnrollment))
+    .get();
+  return row?.n ?? 0;
+}
+
+/** Lesson id → number of counted enrollees of the course who completed it. */
+function lessonCompletions(courseId: number): Map<number, number> {
+  const rows = db
+    .select({ lessonId: lessonProgress.lessonId, n: countDistinct(lessonProgress.userId) })
+    .from(lessonProgress)
+    .innerJoin(
+      enrollments,
+      and(eq(enrollments.userId, lessonProgress.userId), eq(enrollments.courseId, courseId))
+    )
+    .innerJoin(courses, eq(enrollments.courseId, courses.id))
+    .innerJoin(users, eq(enrollments.userId, users.id))
+    .where(and(eq(lessonProgress.status, LessonProgressStatus.Completed), countedEnrollment))
+    .groupBy(lessonProgress.lessonId)
+    .all();
+  return new Map(rows.map((r) => [r.lessonId, r.n]));
+}
+
+/**
+ * All-time lesson funnel for one course: every lesson in module then lesson
+ * position order, grouped by module, with the share of all counted
+ * enrollments that completed it. The denominator is always all enrollments,
+ * even for lessons added after students enrolled.
+ */
+export function getCourseFunnel(courseId: number): CourseFunnel {
+  const total = countedEnrollmentsAllTime(courseId);
+  const completions = lessonCompletions(courseId);
+  const rows = db
+    .select({
+      moduleId: modules.id,
+      moduleTitle: modules.title,
+      lessonId: lessons.id,
+      lessonTitle: lessons.title,
+    })
+    .from(lessons)
+    .innerJoin(modules, eq(lessons.moduleId, modules.id))
+    .where(eq(modules.courseId, courseId))
+    .orderBy(modules.position, modules.id, lessons.position, lessons.id)
+    .all();
+
+  // Drops compare completion counts (the denominator is constant) so ties are exact.
+  let biggestDropLessonId: number | null = null;
+  let biggestDrop = 0;
+  let previousCount: number | null = null;
+  const grouped: FunnelModule[] = [];
+  for (const row of rows) {
+    let mod = grouped.at(-1);
+    if (mod?.id !== row.moduleId) {
+      mod = { id: row.moduleId, title: row.moduleTitle, lessons: [] };
+      grouped.push(mod);
+    }
+    const completed = completions.get(row.lessonId) ?? 0;
+    const drop = previousCount === null ? null : previousCount - completed;
+    if (total && drop !== null && drop > biggestDrop) {
+      biggestDrop = drop;
+      biggestDropLessonId = row.lessonId;
+    }
+    previousCount = completed;
+    mod.lessons.push({
+      id: row.lessonId,
+      title: row.lessonTitle,
+      completionRate: total ? completed / total : null,
+      dropFromPrevious: total && drop !== null ? drop / total : null,
+      isBiggestDrop: false,
+    });
+  }
+  for (const lesson of grouped.flatMap((m) => m.lessons)) {
+    lesson.isBiggestDrop = lesson.id === biggestDropLessonId;
+  }
+  return { enrollments: total, modules: grouped, biggestDropLessonId };
+}
+
 export type CourseAnalytics = {
   totals: OverviewTotals & CourseEngagement;
   /** Revenue and enrollments for the preceding equal-length window; null for "all". */
   previous: OverviewTotals | null;
+  /** All-time lesson drop-off funnel (#8). */
+  funnel: CourseFunnel;
 };
 
 /**
@@ -259,5 +367,6 @@ export function getCourseAnalytics(courseId: number, range: Range, now: Date): C
   return {
     totals: { ...windowed(window), ...getCourseEngagement(courseId) },
     previous: previousWindow ? windowed(previousWindow) : null,
+    funnel: getCourseFunnel(courseId),
   };
 }
