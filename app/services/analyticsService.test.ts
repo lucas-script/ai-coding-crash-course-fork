@@ -15,6 +15,18 @@ import { getCourseAnalytics, getInstructorOverview, parseRange } from "./analyti
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
 
+function student(name: string, role: schema.UserRole = schema.UserRole.Student) {
+  return testDb
+    .insert(schema.users)
+    .values({ name, email: `${name}@example.com`, role })
+    .returning()
+    .get();
+}
+
+function enroll(userId: number, enrolledAt: string, courseId = base.course.id) {
+  testDb.insert(schema.enrollments).values({ userId, courseId, enrolledAt }).run();
+}
+
 function purchase(amountPaid: number, createdAt: string, courseId = base.course.id) {
   return testDb
     .insert(schema.purchases)
@@ -144,14 +156,14 @@ describe("analyticsService", () => {
       const overview = getInstructorOverview(base.instructor.id, "30d", NOW);
 
       expect(overview.totals.revenue).toBe(0);
-      expect(overview.previous).toEqual({ revenue: 24995 });
+      expect(overview.previous?.revenue).toBe(24995);
     });
 
     it("returns zeros when there is no data", () => {
       const overview = getInstructorOverview(base.instructor.id, "30d", NOW);
 
-      expect(overview.totals.revenue).toBe(0);
-      expect(overview.previous).toEqual({ revenue: 0 });
+      expect(overview.totals).toEqual({ revenue: 0, enrollments: 0 });
+      expect(overview.previous).toEqual({ revenue: 0, enrollments: 0 });
     });
   });
 
@@ -165,22 +177,178 @@ describe("analyticsService", () => {
       const overview = getInstructorOverview(base.instructor.id, "30d", NOW);
 
       expect(overview.totals.revenue).toBe(100);
-      expect(overview.previous).toEqual({ revenue: 30 });
+      expect(overview.previous?.revenue).toBe(30);
     });
 
     it("compares 12m against the 12 months before that", () => {
       purchase(50, "2025-01-01T00:00:00.000Z");
       purchase(1, "2024-06-15T12:00:00.000Z"); // exactly 24 months ago — excluded
 
-      expect(getInstructorOverview(base.instructor.id, "12m", NOW).previous).toEqual({
-        revenue: 50,
-      });
+      expect(getInstructorOverview(base.instructor.id, "12m", NOW).previous?.revenue).toBe(50);
     });
 
     it("is null for all time", () => {
       purchase(100, "2026-06-01T00:00:00.000Z");
 
       expect(getInstructorOverview(base.instructor.id, "all", NOW).previous).toBeNull();
+    });
+  });
+
+  describe("getInstructorOverview — new enrollments", () => {
+    it("counts enrollments in the window and the previous window", () => {
+      enroll(student("a").id, "2026-06-10T00:00:00.000Z");
+      enroll(student("b").id, "2026-05-16T12:00:00.001Z");
+      enroll(student("c").id, "2026-05-16T12:00:00.000Z"); // boundary — previous window
+      enroll(student("d").id, "2026-06-15T12:00:00.001Z"); // future — excluded
+
+      const overview = getInstructorOverview(base.instructor.id, "30d", NOW);
+
+      expect(overview.totals.enrollments).toBe(2);
+      expect(overview.previous?.enrollments).toBe(1);
+    });
+
+    it("excludes the instructor's own enrollment and admin enrollments", () => {
+      enroll(base.user.id, "2026-06-10T00:00:00.000Z");
+      enroll(base.instructor.id, "2026-06-10T00:00:00.000Z");
+      enroll(student("admin", schema.UserRole.Admin).id, "2026-06-10T00:00:00.000Z");
+
+      expect(getInstructorOverview(base.instructor.id, "30d", NOW).totals.enrollments).toBe(1);
+    });
+
+    it("counts an enrollment from a redeemed team coupon like any other", () => {
+      const teamPurchase = purchase(2 * 4999, "2026-06-01T00:00:00.000Z", base.course.id);
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      const seat = student("seat");
+      testDb
+        .insert(schema.coupons)
+        .values({
+          teamId: team.id,
+          courseId: base.course.id,
+          code: "SEAT",
+          purchaseId: teamPurchase.id,
+          redeemedByUserId: seat.id,
+          redeemedAt: "2026-06-02T00:00:00.000Z",
+        })
+        .run();
+      enroll(seat.id, "2026-06-02T00:00:00.000Z");
+
+      expect(getInstructorOverview(base.instructor.id, "30d", NOW).totals.enrollments).toBe(1);
+    });
+
+    it("excludes draft courses", () => {
+      const draft = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Draft",
+          slug: "draft",
+          description: "",
+          salesCopy: "",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Draft,
+        })
+        .returning()
+        .get();
+      enroll(base.user.id, "2026-06-10T00:00:00.000Z", draft.id);
+
+      expect(getInstructorOverview(base.instructor.id, "30d", NOW).totals.enrollments).toBe(0);
+    });
+  });
+
+  describe("getInstructorOverview — series", () => {
+    /** Non-zero points only, as [bucket, value] pairs. */
+    function nonZero(points: { bucket: string; value: number }[]) {
+      return points.filter((p) => p.value !== 0).map((p) => [p.bucket, p.value]);
+    }
+
+    it("30d is daily in UTC, zero-filled from the window's first day through today", () => {
+      purchase(100, "2026-06-14T23:59:59.999Z");
+      purchase(10, "2026-06-15T00:00:00.000Z");
+      purchase(1, "2026-06-15T00:00:00.001Z");
+
+      const { series } = getInstructorOverview(base.instructor.id, "30d", NOW);
+
+      expect(series.granularity).toBe("day");
+      expect(series.revenue).toHaveLength(31);
+      expect(series.revenue[0]).toEqual({ bucket: "2026-05-16", value: 0 });
+      expect(series.revenue.at(-1)?.bucket).toBe("2026-06-15");
+      expect(nonZero(series.revenue)).toEqual([
+        ["2026-06-14", 100],
+        ["2026-06-15", 11],
+      ]);
+      expect(series.enrollments.map((p) => p.bucket)).toEqual(series.revenue.map((p) => p.bucket));
+      expect(nonZero(series.enrollments)).toEqual([]);
+    });
+
+    it("90d is weekly, buckets starting on Monday UTC", () => {
+      // NOW is Monday 2026-06-15. Sunday 06-14 belongs to the week of Monday 06-08.
+      purchase(5, "2026-06-14T23:59:59.999Z");
+      purchase(7, "2026-06-08T00:00:00.000Z");
+      purchase(3, "2026-06-15T00:00:00.000Z");
+
+      const { series } = getInstructorOverview(base.instructor.id, "90d", NOW);
+
+      expect(series.granularity).toBe("week");
+      // Window starts Tue 2026-03-17, whose week starts Mon 2026-03-16.
+      expect(series.revenue[0].bucket).toBe("2026-03-16");
+      expect(series.revenue.at(-1)?.bucket).toBe("2026-06-15");
+      expect(series.revenue).toHaveLength(14);
+      expect(nonZero(series.revenue)).toEqual([
+        ["2026-06-08", 12],
+        ["2026-06-15", 3],
+      ]);
+    });
+
+    it("12m is monthly, split at the first of the month UTC", () => {
+      purchase(1, "2026-04-30T23:59:59.999Z");
+      purchase(2, "2026-05-01T00:00:00.000Z");
+
+      const { series } = getInstructorOverview(base.instructor.id, "12m", NOW);
+
+      expect(series.granularity).toBe("month");
+      expect(series.revenue).toHaveLength(13);
+      expect(series.revenue[0].bucket).toBe("2025-06-01");
+      expect(series.revenue.at(-1)?.bucket).toBe("2026-06-01");
+      expect(nonZero(series.revenue)).toEqual([
+        ["2026-04-01", 1],
+        ["2026-05-01", 2],
+      ]);
+    });
+
+    it("all is monthly from the earliest sale or enrollment", () => {
+      purchase(9, "2026-03-20T00:00:00.000Z");
+      enroll(base.user.id, "2026-02-10T00:00:00.000Z");
+
+      const { series } = getInstructorOverview(base.instructor.id, "all", NOW);
+
+      expect(series.granularity).toBe("month");
+      expect(series.revenue.map((p) => p.bucket)).toEqual([
+        "2026-02-01",
+        "2026-03-01",
+        "2026-04-01",
+        "2026-05-01",
+        "2026-06-01",
+      ]);
+      expect(nonZero(series.revenue)).toEqual([["2026-03-01", 9]]);
+      expect(nonZero(series.enrollments)).toEqual([["2026-02-01", 1]]);
+    });
+
+    it("all with no data has no buckets", () => {
+      const { series } = getInstructorOverview(base.instructor.id, "all", NOW);
+
+      expect(series.revenue).toEqual([]);
+      expect(series.enrollments).toEqual([]);
+    });
+
+    it("enrollment series applies the same exclusions as the headline", () => {
+      enroll(base.user.id, "2026-06-10T08:00:00.000Z");
+      enroll(base.instructor.id, "2026-06-10T09:00:00.000Z");
+      enroll(student("admin", schema.UserRole.Admin).id, "2026-06-10T10:00:00.000Z");
+      enroll(student("b").id, "2026-06-10T11:00:00.000Z");
+
+      const { series } = getInstructorOverview(base.instructor.id, "30d", NOW);
+
+      expect(nonZero(series.enrollments)).toEqual([["2026-06-10", 2]]);
     });
   });
 

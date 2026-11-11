@@ -43,6 +43,10 @@ export default [
       "routes/instructor.$courseId.analytics.tsx"
     ),
     route("admin/users", "routes/admin.users.tsx"),
+    route(
+      "admin/instructors/:instructorId/analytics",
+      "routes/admin.instructors.$instructorId.analytics.tsx"
+    ),
     route("admin/courses", "routes/admin.courses.tsx"),
     route("admin/categories", "routes/admin.categories.tsx"),
     route("settings", "routes/settings.tsx"),
