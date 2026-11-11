@@ -11,7 +11,12 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { getCourseAnalytics, getInstructorOverview, parseRange } from "./analyticsService";
+import {
+  getCourseAnalytics,
+  getCourseFunnel,
+  getInstructorOverview,
+  parseRange,
+} from "./analyticsService";
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
 
@@ -568,6 +573,172 @@ describe("analyticsService", () => {
       const { series } = getCourseAnalytics(base.course.id, "30d", NOW);
 
       expect(nonZero(series.enrollments)).toEqual([["2026-06-10", 1]]);
+    });
+  });
+
+  // ─── Lesson drop-off funnel (#8) ───
+  describe("getCourseFunnel", () => {
+    let seq = 0;
+    function learner(role: schema.UserRole = schema.UserRole.Student) {
+      seq += 1;
+      return student(`funnel-${seq}`, role);
+    }
+
+    function addModule(title: string, position: number, courseId = base.course.id) {
+      return testDb.insert(schema.modules).values({ courseId, title, position }).returning().get();
+    }
+
+    function addLesson(moduleId: number, title: string, position: number) {
+      return testDb.insert(schema.lessons).values({ moduleId, title, position }).returning().get();
+    }
+
+    function complete(userId: number, lessonId: number) {
+      testDb
+        .insert(schema.lessonProgress)
+        .values({ userId, lessonId, status: schema.LessonProgressStatus.Completed })
+        .run();
+    }
+
+    /** Enrolls `n` students; returns their ids. */
+    function enrollStudents(n: number) {
+      return Array.from({ length: n }, () => {
+        const u = learner();
+        enroll(u.id, "2026-01-01T00:00:00.000Z");
+        return u.id;
+      });
+    }
+
+    it("lists every lesson grouped by module, in module then lesson position order", () => {
+      const second = addModule("Second", 2);
+      const first = addModule("First", 1);
+      addLesson(second.id, "B2", 2);
+      addLesson(second.id, "B1", 1);
+      addLesson(first.id, "A1", 1);
+      enrollStudents(1);
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(
+        funnel.modules.map((m) => ({ title: m.title, lessons: m.lessons.map((l) => l.title) }))
+      ).toEqual([
+        { title: "First", lessons: ["A1"] },
+        { title: "Second", lessons: ["B1", "B2"] },
+      ]);
+    });
+
+    it("each lesson's rate is students who completed it ÷ all counted enrollments", () => {
+      const mod = addModule("Only", 1);
+      const one = addLesson(mod.id, "One", 1);
+      const two = addLesson(mod.id, "Two", 2);
+      const [a, b, c, d] = enrollStudents(4);
+      complete(a, one.id);
+      complete(b, one.id);
+      complete(c, one.id);
+      complete(a, two.id);
+      testDb
+        .insert(schema.lessonProgress)
+        .values({ userId: d, lessonId: two.id, status: schema.LessonProgressStatus.InProgress })
+        .run(); // started is not completed
+      const admin = learner(schema.UserRole.Admin);
+      enroll(admin.id, "2026-01-01T00:00:00.000Z");
+      enroll(base.instructor.id, "2026-01-01T00:00:00.000Z");
+      complete(admin.id, one.id); // excluded
+      complete(base.instructor.id, one.id); // excluded
+      complete(learner().id, two.id); // not enrolled
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(funnel.enrollments).toBe(4);
+      expect(funnel.modules[0].lessons.map((l) => l.completionRate)).toEqual([0.75, 0.25]);
+    });
+
+    it("a lesson added later still divides by all enrollments", () => {
+      const mod = addModule("Only", 1);
+      const old = addLesson(mod.id, "Old", 1);
+      const [a, b] = enrollStudents(2);
+      complete(a, old.id);
+      complete(b, old.id);
+      addLesson(mod.id, "New", 2);
+
+      expect(getCourseFunnel(base.course.id).modules[0].lessons.map((l) => l.completionRate)).toEqual([1, 0]);
+    });
+
+    /** One module per entry; each lesson completed by the first `n` of `students`. */
+    function funnelOf(students: number[], completedBy: number[][]) {
+      return completedBy.map((lessonsInModule, m) => {
+        const mod = addModule(`M${m + 1}`, m + 1);
+        return lessonsInModule.map((n, l) => {
+          const lesson = addLesson(mod.id, `M${m + 1}L${l + 1}`, l + 1);
+          for (const id of students.slice(0, n)) complete(id, lesson.id);
+          return lesson;
+        });
+      });
+    }
+
+    it("flags the lesson with the largest drop vs the previous lesson, across module boundaries", () => {
+      const students = enrollStudents(10);
+      // 100%, 90% | 40%, 30% — the 50pp drop is into the first lesson of module 2.
+      const [, [m2l1]] = funnelOf(students, [[10, 9], [4, 3]]);
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(funnel.biggestDropLessonId).toBe(m2l1.id);
+      const flagged = funnel.modules.flatMap((m) => m.lessons).filter((l) => l.isBiggestDrop);
+      expect(flagged.map((l) => l.id)).toEqual([m2l1.id]);
+      expect(flagged[0].dropFromPrevious).toBeCloseTo(0.5);
+    });
+
+    it("on a tie, flags only the earliest of the equal drops", () => {
+      const students = enrollStudents(10);
+      const [[, second]] = funnelOf(students, [[10, 8, 8, 6]]);
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(funnel.biggestDropLessonId).toBe(second.id);
+      expect(funnel.modules[0].lessons.filter((l) => l.isBiggestDrop)).toHaveLength(1);
+    });
+
+    it("flags nothing when completion never decreases", () => {
+      const students = enrollStudents(4);
+      funnelOf(students, [[2, 2], [3]]);
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(funnel.biggestDropLessonId).toBeNull();
+      expect(funnel.modules.flatMap((m) => m.lessons).some((l) => l.isBiggestDrop)).toBe(false);
+    });
+
+    it("the first lesson has no previous lesson to drop from", () => {
+      enrollStudents(2);
+      funnelOf([], [[0]]);
+
+      const funnel = getCourseFunnel(base.course.id);
+
+      expect(funnel.modules[0].lessons[0].dropFromPrevious).toBeNull();
+      expect(funnel.biggestDropLessonId).toBeNull();
+    });
+
+    it("is empty with no lessons, and has null rates and no flag with no enrollments", () => {
+      expect(getCourseFunnel(base.course.id)).toEqual({
+        enrollments: 0,
+        modules: [],
+        biggestDropLessonId: null,
+      });
+
+      funnelOf([], [[0, 0]]);
+      const funnel = getCourseFunnel(base.course.id);
+      expect(funnel.enrollments).toBe(0);
+      expect(funnel.modules[0].lessons.map((l) => l.completionRate)).toEqual([null, null]);
+      expect(funnel.biggestDropLessonId).toBeNull();
+    });
+
+    it("is part of the course analytics", () => {
+      const students = enrollStudents(1);
+      funnelOf(students, [[1]]);
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).funnel).toEqual(
+        getCourseFunnel(base.course.id)
+      );
     });
   });
 });
