@@ -2,7 +2,8 @@ import { Form, Link, useActionData, useNavigation, useSearchParams } from "react
 import { redirect, data } from "react-router";
 import { z } from "zod";
 import type { Route } from "./+types/login";
-import { getUserByEmail } from "~/services/userService";
+import { getUserByEmail, getUserById } from "~/services/userService";
+import { getLoginDestination } from "~/lib/login-redirect";
 import { setCurrentUserId, getCurrentUserId } from "~/lib/session";
 import { parseFormData } from "~/lib/validation";
 import { Button } from "~/components/ui/button";
@@ -27,10 +28,9 @@ export function meta() {
 
 export async function loader({ request, url }: Route.LoaderArgs) {
   const currentUserId = await getCurrentUserId(request);
-  if (currentUserId) {
-    const redirectTo = url.searchParams.get("redirectTo");
-    const destination = redirectTo && redirectTo.startsWith("/") ? redirectTo : "/courses";
-    throw redirect(destination);
+  const currentUser = currentUserId ? getUserById(currentUserId) : undefined;
+  if (currentUser) {
+    throw redirect(getLoginDestination(currentUser.role, url.searchParams.get("redirectTo")));
   }
   return {};
 }
@@ -59,8 +59,7 @@ export async function action({ request, url }: Route.ActionArgs) {
     );
   }
 
-  const redirectTo = url.searchParams.get("redirectTo");
-  const destination = redirectTo && redirectTo.startsWith("/") ? redirectTo : "/courses";
+  const destination = getLoginDestination(user.role, url.searchParams.get("redirectTo"));
 
   const cookie = await setCurrentUserId(request, user.id);
   throw redirect(destination, {
