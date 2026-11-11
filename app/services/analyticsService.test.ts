@@ -11,7 +11,7 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { getInstructorOverview, parseRange } from "./analyticsService";
+import { getCourseAnalytics, getInstructorOverview, parseRange } from "./analyticsService";
 
 const NOW = new Date("2026-06-15T12:00:00.000Z");
 
@@ -181,6 +181,155 @@ describe("analyticsService", () => {
       purchase(100, "2026-06-01T00:00:00.000Z");
 
       expect(getInstructorOverview(base.instructor.id, "all", NOW).previous).toBeNull();
+    });
+  });
+
+  describe("getCourseAnalytics", () => {
+    function user(role: schema.UserRole, name = `u-${Math.random()}`) {
+      return testDb
+        .insert(schema.users)
+        .values({ name, email: `${name}@example.com`, role })
+        .returning()
+        .get();
+    }
+
+    function otherCourse() {
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other",
+          slug: `other-${Math.random()}`,
+          description: "",
+          salesCopy: "",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+    }
+
+    it("sums revenue for just that course within the range, with the previous window", () => {
+      const other = otherCourse();
+      purchase(100, "2026-06-01T00:00:00.000Z");
+      purchase(1000, "2026-06-01T00:00:00.000Z", other.id);
+      purchase(20, "2026-05-01T00:00:00.000Z"); // previous 30d
+
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(analytics.totals.revenue).toBe(100);
+      expect(analytics.previous?.revenue).toBe(20);
+    });
+
+    function enroll(
+      userId: number,
+      enrolledAt = "2026-06-01T00:00:00.000Z",
+      completedAt: string | null = null,
+      courseId = base.course.id
+    ) {
+      return testDb
+        .insert(schema.enrollments)
+        .values({ userId, courseId, enrolledAt, completedAt })
+        .returning()
+        .get();
+    }
+
+    it("counts new enrollments in the range and the previous window, excluding the instructor and admins", () => {
+      enroll(base.user.id, "2026-06-01T00:00:00.000Z");
+      enroll(user(schema.UserRole.Student).id, "2026-05-01T00:00:00.000Z"); // previous
+      enroll(user(schema.UserRole.Student).id, "2026-01-01T00:00:00.000Z"); // outside both
+      enroll(base.instructor.id, "2026-06-01T00:00:00.000Z"); // own course — excluded
+      enroll(user(schema.UserRole.Admin).id, "2026-06-01T00:00:00.000Z"); // admin — excluded
+      enroll(user(schema.UserRole.Student).id, "2026-06-01T00:00:00.000Z", null, otherCourse().id);
+
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(analytics.totals.enrollments).toBe(1);
+      expect(analytics.previous?.enrollments).toBe(1);
+    });
+
+    it("counts another instructor enrolled as a student", () => {
+      enroll(user(schema.UserRole.Instructor).id);
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.enrollments).toBe(1);
+    });
+
+    it("completion rate is completed ÷ all counted enrollments, all-time and ignoring the range", () => {
+      enroll(base.user.id, "2020-01-01T00:00:00.000Z", "2020-02-01T00:00:00.000Z");
+      enroll(user(schema.UserRole.Student).id, "2026-06-01T00:00:00.000Z");
+      enroll(user(schema.UserRole.Student).id, "2026-06-01T00:00:00.000Z");
+      enroll(user(schema.UserRole.Student).id, "2021-01-01T00:00:00.000Z", "2021-03-01T00:00:00.000Z");
+      // Excluded completions must not lift the rate
+      enroll(base.instructor.id, "2026-06-01T00:00:00.000Z", "2026-06-02T00:00:00.000Z");
+      enroll(user(schema.UserRole.Admin).id, "2026-06-01T00:00:00.000Z", "2026-06-02T00:00:00.000Z");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.completionRate).toBe(0.5);
+      expect(getCourseAnalytics(base.course.id, "all", NOW).totals.completionRate).toBe(0.5);
+    });
+
+    function lessonIn(courseId: number) {
+      const mod = testDb
+        .insert(schema.modules)
+        .values({ courseId, title: "M", position: 1 })
+        .returning()
+        .get();
+      return testDb
+        .insert(schema.lessons)
+        .values({ moduleId: mod.id, title: "L", position: 1 })
+        .returning()
+        .get();
+    }
+
+    function progress(userId: number, lessonId: number, status: schema.LessonProgressStatus) {
+      testDb.insert(schema.lessonProgress).values({ userId, lessonId, status }).run();
+    }
+
+    it("activation rate is enrollments with a lesson started or completed in this course ÷ all counted enrollments", () => {
+      const lesson = lessonIn(base.course.id);
+      const otherLesson = lessonIn(otherCourse().id);
+      const started = user(schema.UserRole.Student);
+      const finished = user(schema.UserRole.Student);
+      const notStarted = user(schema.UserRole.Student);
+      const elsewhere = user(schema.UserRole.Student);
+      const admin = user(schema.UserRole.Admin);
+      for (const u of [started, finished, notStarted, elsewhere, admin]) enroll(u.id);
+      enroll(base.instructor.id);
+      progress(started.id, lesson.id, schema.LessonProgressStatus.InProgress);
+      progress(finished.id, lesson.id, schema.LessonProgressStatus.Completed);
+      progress(notStarted.id, lesson.id, schema.LessonProgressStatus.NotStarted);
+      progress(elsewhere.id, otherLesson.id, schema.LessonProgressStatus.Completed); // other course
+      progress(admin.id, lesson.id, schema.LessonProgressStatus.Completed); // excluded
+      progress(base.instructor.id, lesson.id, schema.LessonProgressStatus.Completed); // excluded
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.activationRate).toBe(0.5);
+    });
+
+    it("rating is the all-time average of that course's ratings", () => {
+      const other = otherCourse();
+      const rate = (userId: number, rating: number, courseId = base.course.id) =>
+        testDb.insert(schema.courseRatings).values({ userId, courseId, rating }).run();
+      rate(base.user.id, 5);
+      rate(user(schema.UserRole.Student).id, 4);
+      rate(user(schema.UserRole.Student).id, 2, other.id);
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).totals.rating).toBe(4.5);
+    });
+
+    it("returns zeros and nulls when the course has no data", () => {
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)).toEqual({
+        totals: {
+          revenue: 0,
+          enrollments: 0,
+          completionRate: null,
+          activationRate: null,
+          rating: null,
+        },
+        previous: { revenue: 0, enrollments: 0 },
+      });
+    });
+
+    it("has no previous window for all time", () => {
+      expect(getCourseAnalytics(base.course.id, "all", NOW).previous).toBeNull();
     });
   });
 });

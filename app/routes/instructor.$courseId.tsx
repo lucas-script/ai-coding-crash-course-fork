@@ -69,6 +69,7 @@ import {
   Award,
   Globe,
   FileText,
+  BarChart3,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -1172,6 +1173,13 @@ export default function InstructorCourseEditor({
           <span className="text-xs text-muted-foreground">
             Slug: /courses/{course.slug}
           </span>
+          <Link
+            to={`/instructor/${course.id}/analytics`}
+            className="flex items-center gap-1.5 font-medium text-primary hover:underline"
+          >
+            <BarChart3 className="size-4" />
+            Analytics
+          </Link>
         </div>
       </div>
 
