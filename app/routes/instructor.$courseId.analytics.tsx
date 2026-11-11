@@ -6,6 +6,7 @@ import { getCourseAnalytics, parseRange } from "~/services/analyticsService";
 import { requireStaff } from "~/lib/access.server";
 import { Button } from "~/components/ui/button";
 import {
+  CourseCharts,
   CourseEngagementStats,
   CourseRangeStats,
 } from "~/components/analytics/course-analytics";
@@ -67,6 +68,7 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
 
       {/* Sections stack here; later tickets add charts, funnel, countries, seats. */}
       <CourseRangeStats analytics={analytics} range={range} />
+      <CourseCharts analytics={analytics} range={range} />
       <CourseEngagementStats analytics={analytics} />
     </div>
   );
