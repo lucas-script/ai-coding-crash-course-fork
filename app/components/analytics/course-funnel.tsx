@@ -1,6 +1,7 @@
 import { TrendingDown } from "lucide-react";
 import type { CourseFunnel } from "~/services/analyticsService";
-import { AnalyticsSection, formatRate } from "~/components/analytics/course-analytics";
+import { AnalyticsSection } from "~/components/analytics/course-analytics";
+import { formatRate } from "~/components/analytics/instructor-overview";
 import { cn } from "~/lib/utils";
 
 /** A 0–1 drop as whole percentage points, e.g. "−43 pp". */

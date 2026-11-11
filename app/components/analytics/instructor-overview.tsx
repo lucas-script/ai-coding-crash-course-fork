@@ -155,15 +155,18 @@ export function OverviewCharts({ series }: { series: OverviewSeries }) {
 }
 
 /**
- * Analytics overview for one instructor: range selector, headline tiles, and charts.
- * Read-only and self-contained, so instructor and admin routes can both render it.
+ * Analytics overview for one instructor: range selector, headline tiles, charts,
+ * and course table. Self-contained, so instructor and admin routes can both
+ * render it; `readOnly` (the admin view) drops the instructor's own calls to action.
  */
 export function InstructorOverviewPanel({
   overview,
   range,
+  readOnly = false,
 }: {
   overview: InstructorOverview;
   range: Range;
+  readOnly?: boolean;
 }) {
   const { totals, previous } = overview;
   const comparisonLabel = previous ? `vs previous ${RANGE_LABELS[range].toLowerCase()}` : undefined;
@@ -189,19 +192,35 @@ export function InstructorOverviewPanel({
           change={previous ? percentChange(totals.enrollments, previous.enrollments) : undefined}
           comparisonLabel={comparisonLabel}
         />
-        <EngagementTiles engagement={overview.engagement} />
+        <EngagementTiles engagement={overview.engagement} readOnly={readOnly} />
       </div>
       <OverviewCharts series={overview.series} />
-      <CoursePerformanceTable rows={overview.courses} />
+      <CoursePerformanceTable rows={overview.courses} readOnly={readOnly} />
     </section>
   );
 }
 
 /**
- * All-time average completion and rating, plus the unanswered-questions count
- * linking to the questions queue (open to instructors and admins).
+ * All-time average completion and rating, plus the unanswered-questions count.
+ * The instructor's view links the count to their questions queue; the admin
+ * view doesn't, because an admin's queue lists every instructor's questions.
  */
-function EngagementTiles({ engagement }: { engagement: OverviewEngagement }) {
+function EngagementTiles({
+  engagement,
+  readOnly,
+}: {
+  engagement: OverviewEngagement;
+  readOnly: boolean;
+}) {
+  const queueLink = (
+    <Link
+      to="/instructor/questions"
+      className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+    >
+      <MessageCircleQuestion className="size-3" />
+      Open questions queue
+    </Link>
+  );
   return (
     <>
       <StatTile label="Avg. completion" value={formatRate(engagement.averageCompletion)} note="All time" />
@@ -209,15 +228,7 @@ function EngagementTiles({ engagement }: { engagement: OverviewEngagement }) {
       <StatTile
         label="Unanswered questions"
         value={engagement.unansweredQuestions.toLocaleString("en-US")}
-        note={
-          <Link
-            to="/instructor/questions"
-            className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
-          >
-            <MessageCircleQuestion className="size-3" />
-            Open questions queue
-          </Link>
-        }
+        note={readOnly ? "In this instructor's queue" : queueLink}
       />
     </>
   );
@@ -231,20 +242,32 @@ const STATUS_LABELS: Record<CourseStatus, string> = {
 
 /**
  * Per-course figures for Published and Archived courses; each title links to
- * the course's analytics page. With no such courses, prompts to publish one.
+ * the course's analytics page. With no Published course (Archived rows are
+ * still listed), the instructor is prompted to publish one; the read-only
+ * admin view shows a neutral message instead.
  */
-export function CoursePerformanceTable({ rows }: { rows: CoursePerformanceRow[] }) {
+export function CoursePerformanceTable({
+  rows,
+  readOnly = false,
+}: {
+  rows: CoursePerformanceRow[];
+  readOnly?: boolean;
+}) {
+  const hasPublished = rows.some((row) => row.status === CourseStatus.Published);
   return (
     <Card className="mt-4 gap-4">
       <CardHeader>
         <CardTitle>Course performance</CardTitle>
       </CardHeader>
       <CardContent>
-        {rows.length === 0 ? (
+        {!hasPublished && (
           <p className="py-6 text-center text-sm text-muted-foreground">
-            No published courses yet. Publish a course to see how it performs here.
+            {readOnly
+              ? "This instructor has no published courses."
+              : "No published courses yet. Publish a course to start tracking how it performs here."}
           </p>
-        ) : (
+        )}
+        {rows.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

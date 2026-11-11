@@ -1,12 +1,13 @@
-import { data, isRouteErrorResponse, Link } from "react-router";
-import { AlertTriangle } from "lucide-react";
+import { data, Link } from "react-router";
 import type { Route } from "./+types/admin.instructors.$instructorId.analytics";
 import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
-import { getInstructorOverview, parseRange } from "~/services/analyticsService";
+import { getInstructorOverview } from "~/services/analyticsService";
+import { parseRange } from "~/lib/analytics-range";
 import { adminOverviewAccess } from "~/lib/admin-instructor-overview";
 import { InstructorOverviewPanel } from "~/components/analytics/instructor-overview";
 import { Button } from "~/components/ui/button";
+import { RouteErrorPanel } from "~/components/route-error";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const name = loaderData?.instructor.name ?? "Instructor";
@@ -59,46 +60,29 @@ export default function AdminInstructorAnalytics({ loaderData }: Route.Component
         <p className="mt-1 text-muted-foreground">Instructor analytics (read-only)</p>
       </div>
 
-      <InstructorOverviewPanel overview={overview} range={range} />
+      <InstructorOverviewPanel overview={overview} range={range} readOnly />
     </div>
   );
 }
 
 export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
-  let title = "Something went wrong";
-  let message = "An unexpected error occurred while loading instructor analytics.";
-
-  if (isRouteErrorResponse(error)) {
-    if (error.status === 401) {
-      title = "Sign in required";
-      message = typeof error.data === "string" ? error.data : "Please select a user from the DevUI panel.";
-    } else if (error.status === 403) {
-      title = "Access denied";
-      message = typeof error.data === "string" ? error.data : "Only admins can access this page.";
-    } else if (error.status === 404) {
-      title = "Not found";
-      message = typeof error.data === "string" ? error.data : "Instructor not found.";
-    } else {
-      title = `Error ${error.status}`;
-      message = typeof error.data === "string" ? error.data : error.statusText;
-    }
-  }
-
   return (
-    <div className="flex min-h-[50vh] items-center justify-center p-6">
-      <div className="text-center">
-        <AlertTriangle className="mx-auto mb-4 size-12 text-muted-foreground" />
-        <h1 className="mb-2 text-2xl font-bold">{title}</h1>
-        <p className="mb-6 text-muted-foreground">{message}</p>
-        <div className="flex items-center justify-center gap-3">
-          <Link to="/admin/users">
-            <Button variant="outline">Manage Users</Button>
-          </Link>
-          <Link to="/">
-            <Button>Go Home</Button>
-          </Link>
-        </div>
+    <RouteErrorPanel
+      error={error}
+      fallback="An unexpected error occurred while loading instructor analytics."
+      copy={{
+        403: { message: "Only admins can access this page." },
+        404: { message: "Instructor not found." },
+      }}
+    >
+      <div className="flex items-center justify-center gap-3">
+        <Link to="/admin/users">
+          <Button variant="outline">Manage Users</Button>
+        </Link>
+        <Link to="/">
+          <Button>Go Home</Button>
+        </Link>
       </div>
-    </div>
+    </RouteErrorPanel>
   );
 }

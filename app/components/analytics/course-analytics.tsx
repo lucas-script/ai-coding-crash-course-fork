@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import type { Range } from "~/lib/analytics-range";
-import type { CourseAnalytics } from "~/services/analyticsService";
-import type { SalesSlice } from "~/services/analyticsService";
+import type { CourseAnalytics, SalesSlice } from "~/services/analyticsService";
 import { Card, CardContent } from "~/components/ui/card";
 import {
   OverviewCharts,
@@ -14,12 +13,7 @@ import {
   formatRating,
 } from "~/components/analytics/instructor-overview";
 
-export { formatRate, formatRating };
-
-/**
- * A titled block on the course analytics page. Later sections (funnel,
- * revenue by country, team seats, charts) are added as more of these.
- */
+/** A titled block on the course analytics page. */
 export function AnalyticsSection({
   id,
   title,
