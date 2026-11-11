@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createTestDb, seedBaseData } from "~/test/setup";
 import * as schema from "~/db/schema";
+import { eq } from "drizzle-orm";
 
 let testDb: ReturnType<typeof createTestDb>;
 let base: ReturnType<typeof seedBaseData>;
@@ -484,7 +485,7 @@ describe("analyticsService", () => {
     });
 
     it("returns zeros and nulls when the course has no data", () => {
-      expect(getCourseAnalytics(base.course.id, "30d", NOW)).toEqual({
+      expect(getCourseAnalytics(base.course.id, "30d", NOW)).toMatchObject({
         totals: {
           revenue: 0,
           enrollments: 0,
@@ -498,6 +499,134 @@ describe("analyticsService", () => {
 
     it("has no previous window for all time", () => {
       expect(getCourseAnalytics(base.course.id, "all", NOW).previous).toBeNull();
+    });
+  });
+
+  // ─── Ticket #9: revenue by country and team seats ───
+  describe("getCourseAnalytics — revenue by country", () => {
+    const IN_RANGE = "2026-06-01T00:00:00.000Z";
+
+    function priced(price: number) {
+      testDb.update(schema.courses).set({ price }).where(eq(schema.courses.id, base.course.id)).run();
+    }
+
+    function sale(amountPaid: number, country: string | null, createdAt = IN_RANGE, courseId = base.course.id) {
+      return testDb
+        .insert(schema.purchases)
+        .values({ userId: base.user.id, courseId, amountPaid, country, createdAt })
+        .returning()
+        .get();
+    }
+
+    it("groups revenue and purchase count by country, sorted by revenue, with no country as Unknown", () => {
+      priced(1000);
+      sale(1000, "US");
+      sale(1000, "US");
+      sale(1000, null);
+      sale(1000, "IN");
+      sale(1000, "IN");
+      sale(1000, "IN");
+
+      const rows = getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry;
+
+      expect(rows.map((r) => [r.country, r.revenue, r.purchases])).toEqual([
+        ["IN", 3000, 3],
+        ["US", 2000, 2],
+        ["Unknown", 1000, 1],
+      ]);
+    });
+
+    /** A team purchase: one purchase row for the full amount plus one coupon per seat. */
+    function teamSale(seats: number, redeemed: number, country: string | null, createdAt = IN_RANGE) {
+      const p = sale(1000 * seats, country, createdAt);
+      const team = testDb.insert(schema.teams).values({}).returning().get();
+      for (let i = 0; i < seats; i++) {
+        testDb
+          .insert(schema.coupons)
+          .values({
+            teamId: team.id,
+            courseId: base.course.id,
+            code: `C-${p.id}-${i}`,
+            purchaseId: p.id,
+            redeemedByUserId: i < redeemed ? base.user.id : null,
+            redeemedAt: i < redeemed ? createdAt : null,
+          })
+          .run();
+      }
+      return p;
+    }
+
+    it("splits each country into PPP, full-price, and team purchases", () => {
+      priced(1000);
+      sale(1000, "US"); // full price
+      sale(400, "US"); // PPP — below list price
+      sale(300, "US"); // PPP
+      teamSale(3, 0, "US"); // team — 3000, above list price, not full-price individual
+      sale(1200, "DE"); // paid above list price — full price
+
+      const rows = getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry;
+
+      expect(rows).toEqual([
+        {
+          country: "US",
+          revenue: 4700,
+          purchases: 4,
+          fullPrice: { revenue: 1000, purchases: 1 },
+          ppp: { revenue: 700, purchases: 2 },
+          team: { revenue: 3000, purchases: 1 },
+        },
+        {
+          country: "DE",
+          revenue: 1200,
+          purchases: 1,
+          fullPrice: { revenue: 1200, purchases: 1 },
+          ppp: { revenue: 0, purchases: 0 },
+          team: { revenue: 0, purchases: 0 },
+        },
+      ]);
+    });
+
+    it("only counts purchases made within the range", () => {
+      priced(1000);
+      sale(1000, "US");
+      sale(1000, "FR", "2026-01-01T00:00:00.000Z");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry.map((r) => r.country)).toEqual(["US"]);
+      expect(getCourseAnalytics(base.course.id, "all", NOW).revenueByCountry).toHaveLength(2);
+    });
+
+    it("is empty with no purchases in the range", () => {
+      sale(1000, "US", "2026-01-01T00:00:00.000Z");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).revenueByCountry).toEqual([]);
+    });
+
+    it("counts team seats sold and redeemed for team purchases made within the range", () => {
+      teamSale(5, 2, "US");
+      teamSale(8, 5, null);
+      teamSale(4, 4, "US", "2026-01-01T00:00:00.000Z"); // outside 30d
+      sale(1000, "US"); // individual — no seats
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).teamSeats).toEqual({
+        purchases: 2,
+        sold: 13,
+        redeemed: 7,
+      });
+      expect(getCourseAnalytics(base.course.id, "all", NOW).teamSeats).toEqual({
+        purchases: 3,
+        sold: 17,
+        redeemed: 11,
+      });
+    });
+
+    it("has zero team seats with no team purchases", () => {
+      sale(1000, "US");
+
+      expect(getCourseAnalytics(base.course.id, "30d", NOW).teamSeats).toEqual({
+        purchases: 0,
+        sold: 0,
+        redeemed: 0,
+      });
     });
   });
 });

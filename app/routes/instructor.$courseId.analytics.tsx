@@ -9,6 +9,7 @@ import {
   CourseEngagementStats,
   CourseRangeStats,
 } from "~/components/analytics/course-analytics";
+import { CourseRevenueByCountry, CourseTeamSeats } from "~/components/analytics/course-analytics";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course";
@@ -68,6 +69,8 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
       {/* Sections stack here; later tickets add charts, funnel, countries, seats. */}
       <CourseRangeStats analytics={analytics} range={range} />
       <CourseEngagementStats analytics={analytics} />
+      <CourseRevenueByCountry analytics={analytics} range={range} />
+      <CourseTeamSeats analytics={analytics} range={range} />
     </div>
   );
 }
