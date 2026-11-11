@@ -484,20 +484,90 @@ describe("analyticsService", () => {
     });
 
     it("returns zeros and nulls when the course has no data", () => {
-      expect(getCourseAnalytics(base.course.id, "30d", NOW)).toEqual({
-        totals: {
-          revenue: 0,
-          enrollments: 0,
-          completionRate: null,
-          activationRate: null,
-          rating: null,
-        },
-        previous: { revenue: 0, enrollments: 0 },
+      const analytics = getCourseAnalytics(base.course.id, "30d", NOW);
+      expect(analytics.totals).toEqual({
+        revenue: 0,
+        enrollments: 0,
+        completionRate: null,
+        activationRate: null,
+        rating: null,
       });
+      expect(analytics.previous).toEqual({ revenue: 0, enrollments: 0 });
     });
 
     it("has no previous window for all time", () => {
       expect(getCourseAnalytics(base.course.id, "all", NOW).previous).toBeNull();
+    });
+  });
+
+  describe("getCourseAnalytics — series", () => {
+    function nonZero(points: { bucket: string; value: number }[]) {
+      return points.filter((p) => p.value !== 0).map((p) => [p.bucket, p.value]);
+    }
+
+    function otherCourse(instructorId = base.instructor.id) {
+      return testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other",
+          slug: `other-${Math.random()}`,
+          description: "",
+          salesCopy: "",
+          instructorId,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+    }
+
+    it("charts revenue and enrollments for that course only, same buckets as the overview", () => {
+      const other = otherCourse();
+      purchase(4999, "2026-06-10T08:00:00.000Z");
+      purchase(700, "2026-06-10T09:00:00.000Z", other.id);
+      enroll(student("a").id, "2026-06-12T00:00:00.000Z");
+      enroll(student("b").id, "2026-06-12T00:00:00.000Z", other.id);
+
+      const { series } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(series.granularity).toBe("day");
+      expect(series.revenue).toHaveLength(31);
+      expect(series.revenue[0]).toEqual({ bucket: "2026-05-16", value: 0 });
+      expect(series.revenue.at(-1)?.bucket).toBe("2026-06-15");
+      expect(nonZero(series.revenue)).toEqual([["2026-06-10", 4999]]);
+      expect(nonZero(series.enrollments)).toEqual([["2026-06-12", 1]]);
+    });
+
+    it("all starts at this course's earliest event, ignoring other courses' history", () => {
+      const other = otherCourse();
+      purchase(500, "2025-01-10T00:00:00.000Z", other.id);
+      purchase(4999, "2026-04-20T00:00:00.000Z");
+
+      const { series } = getCourseAnalytics(base.course.id, "all", NOW);
+
+      expect(series.granularity).toBe("month");
+      expect(series.revenue.map((p) => p.bucket)).toEqual(["2026-04-01", "2026-05-01", "2026-06-01"]);
+      expect(nonZero(series.revenue)).toEqual([["2026-04-01", 4999]]);
+      expect(nonZero(series.enrollments)).toEqual([]);
+    });
+
+    it("is empty for all time when the course has no sales or enrollments", () => {
+      purchase(500, "2026-06-01T00:00:00.000Z", otherCourse().id);
+
+      const { series } = getCourseAnalytics(base.course.id, "all", NOW);
+
+      expect(series.revenue).toEqual([]);
+      expect(series.enrollments).toEqual([]);
+    });
+
+    it("excludes the course's instructor and admins from the enrollment series", () => {
+      enroll(base.instructor.id, "2026-06-10T00:00:00.000Z");
+      enroll(student("admin", schema.UserRole.Admin).id, "2026-06-10T00:00:00.000Z");
+      enroll(student("c").id, "2026-06-10T00:00:00.000Z");
+
+      const { series } = getCourseAnalytics(base.course.id, "30d", NOW);
+
+      expect(nonZero(series.enrollments)).toEqual([["2026-06-10", 1]]);
     });
   });
 
