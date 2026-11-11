@@ -4,6 +4,7 @@ import type { CourseAnalytics } from "~/services/analyticsService";
 import type { SalesSlice } from "~/services/analyticsService";
 import { Card, CardContent } from "~/components/ui/card";
 import {
+  OverviewCharts,
   RANGE_LABELS,
   RangeSelector,
   StatTile,
@@ -82,6 +83,19 @@ export function CourseRangeStats({
           comparisonLabel={comparisonLabel}
         />
       </div>
+    </AnalyticsSection>
+  );
+}
+
+/** Revenue and enrollments over the selected range — the overview's charts, scoped to one course. */
+export function CourseCharts({ analytics, range }: { analytics: CourseAnalytics; range: Range }) {
+  return (
+    <AnalyticsSection
+      id="course-trends"
+      title="Over time"
+      description={`${RANGE_LABELS[range]} — follows the selected range.`}
+    >
+      <OverviewCharts series={analytics.series} />
     </AnalyticsSection>
   );
 }

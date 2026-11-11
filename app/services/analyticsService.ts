@@ -354,6 +354,8 @@ export type CourseAnalytics = {
   totals: OverviewTotals & CourseEngagement;
   /** Revenue and enrollments for the preceding equal-length window; null for "all". */
   previous: OverviewTotals | null;
+  /** Revenue and enrollment series for the range, bucketed like the overview. */
+  series: OverviewSeries;
 } & CourseSalesBreakdown;
 
 /**
@@ -370,6 +372,7 @@ export function getCourseAnalytics(courseId: number, range: Range, now: Date): C
   return {
     totals: { ...windowed(window), ...getCourseEngagement(courseId) },
     previous: previousWindow ? windowed(previousWindow) : null,
+    series: seriesFor(singleCourse(courseId), range, now),
     ...courseSalesBreakdown(courseId, window),
   };
 }
