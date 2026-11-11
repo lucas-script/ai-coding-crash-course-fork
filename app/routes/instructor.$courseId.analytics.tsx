@@ -11,6 +11,7 @@ import {
   CourseRangeStats,
 } from "~/components/analytics/course-analytics";
 import { CourseFunnelSection } from "~/components/analytics/course-funnel";
+import { CourseRevenueByCountry, CourseTeamSeats } from "~/components/analytics/course-analytics";
 
 export function meta({ loaderData }: Route.MetaArgs) {
   const title = loaderData?.course?.title ?? "Course";
@@ -72,6 +73,8 @@ export default function CourseAnalyticsPage({ loaderData }: Route.ComponentProps
       <CourseCharts analytics={analytics} range={range} />
       <CourseEngagementStats analytics={analytics} />
       <CourseFunnelSection funnel={analytics.funnel} />
+      <CourseRevenueByCountry analytics={analytics} range={range} />
+      <CourseTeamSeats analytics={analytics} range={range} />
     </div>
   );
 }
