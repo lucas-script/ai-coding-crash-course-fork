@@ -12,6 +12,7 @@ import {
   QuestionType,
   TeamMemberRole,
 } from "../app/db/schema";
+import { calculatePppPrice } from "../app/lib/ppp";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -82,7 +83,7 @@ async function seed() {
       email: "alex.rivera@ralph.dev",
       role: UserRole.Admin,
       avatarUrl: "https://api.dicebear.com/9.x/avataaars/svg?seed=alex",
-      createdAt: daysAgo(120),
+      createdAt: daysAgo(500),
     })
     .returning()
     .all();
@@ -95,7 +96,7 @@ async function seed() {
       role: UserRole.Instructor,
       avatarUrl: "https://api.dicebear.com/9.x/avataaars/svg?seed=sarah",
       bio: "Senior TypeScript engineer with 10 years of experience building large-scale web applications. Previously at Stripe and Vercel. Passionate about type safety and developer tooling.",
-      createdAt: daysAgo(100),
+      createdAt: daysAgo(480),
     })
     .returning()
     .all();
@@ -108,7 +109,7 @@ async function seed() {
       role: UserRole.Instructor,
       avatarUrl: "https://api.dicebear.com/9.x/avataaars/svg?seed=marcus",
       bio: "Full-stack developer and API architect specializing in Node.js and cloud infrastructure. Has built and scaled APIs serving millions of requests daily. Conference speaker and open-source contributor.",
-      createdAt: daysAgo(95),
+      createdAt: daysAgo(470),
     })
     .returning()
     .all();
@@ -233,7 +234,7 @@ By the end of this course, you'll understand why TypeScript has become the defau
       status: CourseStatus.Published,
       coverImageUrl: "/images/course-typescript.svg",
       price: 4999,
-      createdAt: daysAgo(90),
+      createdAt: daysAgo(380),
       updatedAt: daysAgo(10),
     })
     .returning()
@@ -614,7 +615,7 @@ Practice by converting an existing JavaScript project to TypeScript. Start with 
         courseId: course1.id,
         title: modData.title,
         position: mi + 1,
-        createdAt: daysAgo(90 - mi),
+        createdAt: daysAgo(380 - mi),
       })
       .returning()
       .all();
@@ -633,7 +634,7 @@ Practice by converting an existing JavaScript project to TypeScript. Start with 
             null,
           position: li + 1,
           durationMinutes: lessonData.duration,
-          createdAt: daysAgo(90 - mi),
+          createdAt: daysAgo(380 - mi),
         })
         .returning()
         .all();
@@ -694,7 +695,7 @@ Every lesson is focused and practical. No 45-minute lectures where 40 minutes ar
       status: CourseStatus.Published,
       coverImageUrl: "/images/course-nodejs.svg",
       price: 5999,
-      createdAt: daysAgo(75),
+      createdAt: daysAgo(370),
       updatedAt: daysAgo(5),
     })
     .returning()
@@ -1115,7 +1116,7 @@ You've completed the Building REST APIs course. You now have the skills to build
         courseId: course2.id,
         title: modData.title,
         position: mi + 1,
-        createdAt: daysAgo(75 - mi),
+        createdAt: daysAgo(370 - mi),
       })
       .returning()
       .all();
@@ -1134,7 +1135,7 @@ You've completed the Building REST APIs course. You now have the skills to build
             null,
           position: li + 1,
           durationMinutes: lessonData.duration,
-          createdAt: daysAgo(75 - mi),
+          createdAt: daysAgo(370 - mi),
         })
         .returning()
         .all();
@@ -1913,18 +1914,448 @@ You've completed the Building REST APIs course. You now have the skills to build
     `Created 1 team with Bossy McBossface as admin, 1 team purchase, and ${seededCoupons.length} coupons (2 redeemed, 3 available).`
   );
 
+  // ─── Analytics Cohort ───
+
+  const cohort = seedAnalyticsCohort({
+    admin,
+    instructor1,
+    instructor2,
+    course1,
+    course2,
+    course1LessonIds,
+    course2LessonIds,
+    categoryId: catBySlug["programming"].id,
+  });
+
+  const studentCount = students.length + 1 + cohort.students;
   console.log("\n✓ Seed complete!");
-  console.log("  Users: 9 (1 admin, 2 instructors, 6 students)");
+  console.log(
+    `  Users: ${3 + studentCount} (1 admin, 2 instructors, ${studentCount} students)`
+  );
   console.log("  Categories: 5");
   console.log(
-    `  Courses: 2 (${course1LessonIds.length} + ${course2LessonIds.length} lessons)`
+    `  Courses: 4 (2 published with ${course1LessonIds.length} + ${course2LessonIds.length} lessons, 1 archived, 1 draft)`
   );
   console.log("  Quizzes: 3");
-  console.log("  Enrollments: 7");
-  console.log("  Course ratings: 6");
+  console.log(`  Enrollments: ${7 + cohort.enrollments}`);
+  console.log(`  Course ratings: ${6 + cohort.ratings}`);
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
-  console.log("  Purchases: 6 (5 individual + 1 team)");
-  console.log("  Teams: 1 (with 5 coupons)");
+  console.log(
+    `  Purchases: ${6 + cohort.purchases} (${5 + cohort.purchases - 1} individual + 2 team)`
+  );
+  console.log("  Teams: 2 (5 coupons, 2 redeemed; 8 coupons, 5 redeemed)");
+}
+
+// ─── Analytics Cohort ───
+// Bulk students whose purchases, enrollments, lesson progress and ratings make
+// the instructor analytics views meaningful: 12 months of sales across PPP and
+// full-price countries, a second partially-redeemed team purchase, a
+// completion funnel with one obvious drop-off lesson, plus an archived course
+// with historical sales and a draft course. A seeded PRNG keeps every run
+// identical.
+
+function mulberry32(seed: number) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const COHORT_NAMES = [
+  "Noah Patel", "Ava Kim", "Ethan Brooks", "Mia Rossi", "Lucas Silva",
+  "Isabella Garcia", "Mason Lee", "Amelia Novak", "Logan Wright", "Harper Singh",
+  "Elijah Okafor", "Evelyn Muller", "Aiden Walsh", "Abigail Dubois", "Caleb Tan",
+  "Ella Kowalski", "Henry Adeyemi", "Scarlett Nguyen", "Owen Fischer", "Grace Santos",
+  "Wyatt Cohen", "Chloe Ramirez", "Jack Ivanov", "Zoe Mendes", "Leo Hassan",
+  "Lily Andersen", "Daniel Reyes", "Nora Yamamoto", "Priya Raman", "Mateo Herrera",
+  "Hannah Schmidt", "Ravi Kumar", "Aisha Bello", "Tomas Lopez",
+];
+
+// Weighted toward full-price markets, with every PPP tier represented.
+const COHORT_COUNTRIES = [
+  "US", "US", "US", "US", "US", "GB", "GB", "DE", "CA", "AU", "FR",
+  "PL", "BR", "MX", "IN", "IN", "PH", "ZA", "NG", "EG",
+];
+
+type CohortCourse = {
+  id: number;
+  price: number;
+  lessonIds: number[];
+  // Index of the lesson where an outsized share of learners give up.
+  dropLesson: number;
+  dropRate: number;
+};
+
+function seedAnalyticsCohort(opts: {
+  admin: typeof schema.users.$inferSelect;
+  instructor1: typeof schema.users.$inferSelect;
+  instructor2: typeof schema.users.$inferSelect;
+  course1: typeof schema.courses.$inferSelect;
+  course2: typeof schema.courses.$inferSelect;
+  course1LessonIds: number[];
+  course2LessonIds: number[];
+  categoryId: number;
+}) {
+  const rand = mulberry32(20261111);
+  const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)];
+  // Skewed toward recent days so sales trend upward over the year.
+  const recentDay = (maxDays: number, minDays = 1) =>
+    minDays + Math.floor((maxDays - minDays) * (1 - Math.sqrt(rand())));
+
+  // ─── Archived and draft courses ───
+
+  const archived = insertCourseWithLessons({
+    title: "JavaScript Essentials (2024 Edition)",
+    description:
+      "The original JavaScript fundamentals course, now retired in favour of Introduction to TypeScript.",
+    instructorId: opts.instructor1.id,
+    categoryId: opts.categoryId,
+    status: CourseStatus.Archived,
+    price: 2999,
+    createdAgo: 460,
+    updatedAgo: 190,
+    lessons: [
+      "Variables and Scope",
+      "Functions and Closures",
+      "Objects and Prototypes",
+      "Async JavaScript",
+      "Modules and Tooling",
+    ],
+  });
+
+  insertCourseWithLessons({
+    title: "GraphQL API Design",
+    description:
+      "Design, build, and secure GraphQL APIs with Node.js. Work in progress.",
+    instructorId: opts.instructor2.id,
+    categoryId: opts.categoryId,
+    status: CourseStatus.Draft,
+    price: 6999,
+    createdAgo: 20,
+    updatedAgo: 2,
+    lessons: ["Why GraphQL?", "Schemas and Resolvers", "Pagination"],
+  });
+
+  const c1: CohortCourse = {
+    id: opts.course1.id,
+    price: opts.course1.price,
+    lessonIds: opts.course1LessonIds,
+    dropLesson: 8, // "Generics Basics"
+    dropRate: 0.65,
+  };
+  const c2: CohortCourse = {
+    id: opts.course2.id,
+    price: opts.course2.price,
+    lessonIds: opts.course2LessonIds,
+    dropLesson: 12,
+    dropRate: 0.25,
+  };
+  const c3: CohortCourse = {
+    id: archived.course.id,
+    price: archived.course.price,
+    lessonIds: archived.lessonIds,
+    dropLesson: 3,
+    dropRate: 0.2,
+  };
+
+  // ─── Plan who buys what, and when ───
+  // The last six students are a team: one buyer and five seat redeemers.
+
+  const teamBuyerIndex = COHORT_NAMES.length - 6;
+  const teamBoughtAgo = 60;
+  const plans = COHORT_NAMES.map((_, i) => {
+    const country = pick(COHORT_COUNTRIES);
+    const buys: { course: CohortCourse; daysAgo: number }[] = [];
+    if (i === 0) {
+      // Early adopter, so sales reach back a full year.
+      buys.push({ course: c1, daysAgo: 364 });
+    } else if (i < teamBuyerIndex) {
+      if (rand() < 0.8) buys.push({ course: c1, daysAgo: recentDay(365) });
+      if (rand() < 0.5) buys.push({ course: c2, daysAgo: recentDay(360) });
+      // The archived course only sold before it was retired ~190 days ago.
+      if (rand() < 0.3)
+        buys.push({ course: c3, daysAgo: 200 + Math.floor(rand() * 165) });
+      if (buys.length === 0) buys.push({ course: c1, daysAgo: recentDay(365) });
+    }
+    return { country, buys };
+  });
+
+  const cohortStudents = db
+    .insert(schema.users)
+    .values(
+      COHORT_NAMES.map((name, i) => {
+        const joinedAgo =
+          i >= teamBuyerIndex
+            ? teamBoughtAgo + 5
+            : Math.max(...plans[i].buys.map((b) => b.daysAgo)) + 1;
+        const handle = name.toLowerCase().replace(/[^a-z]+/g, ".");
+        return {
+          name,
+          email: `${handle}@student.dev`,
+          role: UserRole.Student,
+          avatarUrl: `https://api.dicebear.com/9.x/avataaars/svg?seed=${handle}`,
+          createdAt: daysAgo(joinedAgo),
+        };
+      })
+    )
+    .returning()
+    .all();
+
+  let enrollmentCount = 0;
+  let purchaseCount = 0;
+  let ratingCount = 0;
+
+  // Records lesson progress for one enrollment and returns how many lessons
+  // were completed and when the last one was. Some learners never start, some
+  // stall partway (most often at the course's drop-off lesson), and recent
+  // enrollees haven't had time to get far.
+  function recordProgress(
+    userId: number,
+    course: CohortCourse,
+    enrolledAgo: number
+  ): { done: number; finishedAgo: number | null } {
+    const total = course.lessonIds.length;
+    if (rand() < 0.15) return { done: 0, finishedAgo: null };
+
+    const reachable = Math.min(total, Math.max(1, Math.floor(enrolledAgo * 1.5)));
+    let done = 0;
+    while (done < reachable) {
+      const stayRate =
+        done === 0
+          ? 0.92
+          : done === course.dropLesson
+            ? 1 - course.dropRate
+            : 0.97;
+      if (rand() > stayRate) break;
+      done++;
+    }
+
+    const step = Math.min(3, enrolledAgo / (total + 1));
+    let lastAgo = enrolledAgo;
+    for (let i = 0; i < done; i++) {
+      lastAgo = Math.max(0, Math.floor(enrolledAgo - (i + 1) * step));
+      db.insert(schema.lessonProgress)
+        .values({
+          userId,
+          lessonId: course.lessonIds[i],
+          status: LessonProgressStatus.Completed,
+          completedAt: daysAgo(lastAgo),
+        })
+        .run();
+    }
+    // Everyone who started has at least one record; most who stalled are
+    // mid-lesson.
+    if (done < total && (done === 0 || rand() < 0.6)) {
+      db.insert(schema.lessonProgress)
+        .values({
+          userId,
+          lessonId: course.lessonIds[done],
+          status: LessonProgressStatus.InProgress,
+        })
+        .run();
+    }
+    return { done, finishedAgo: done === total ? lastAgo : null };
+  }
+
+  function enroll(userId: number, course: CohortCourse, enrolledAgo: number) {
+    const { done, finishedAgo } = recordProgress(userId, course, enrolledAgo);
+    db.insert(schema.enrollments)
+      .values({
+        userId,
+        courseId: course.id,
+        enrolledAt: daysAgo(enrolledAgo),
+        completedAt: finishedAgo === null ? null : daysAgo(finishedAgo),
+      })
+      .run();
+    enrollmentCount++;
+
+    if (done >= 3 && rand() < 0.65) {
+      const ratedAgo = Math.max(0, (finishedAgo ?? 1) - 1);
+      db.insert(schema.courseRatings)
+        .values({
+          userId,
+          courseId: course.id,
+          rating:
+            finishedAgo !== null ? pick([5, 5, 5, 4, 4]) : pick([2, 3, 4, 4, 5]),
+          createdAt: daysAgo(ratedAgo),
+          updatedAt: daysAgo(ratedAgo),
+        })
+        .run();
+      ratingCount++;
+    }
+  }
+
+  // ─── Individual purchases ───
+
+  cohortStudents.forEach((student, i) => {
+    const { country, buys } = plans[i];
+    for (const { course, daysAgo: boughtAgo } of buys) {
+      db.insert(schema.purchases)
+        .values({
+          userId: student.id,
+          courseId: course.id,
+          amountPaid: calculatePppPrice(course.price, country),
+          country,
+          createdAt: daysAgo(boughtAgo),
+        })
+        .run();
+      purchaseCount++;
+      enroll(student.id, course, boughtAgo);
+    }
+  });
+
+  // ─── Team purchase: 8 seats of Introduction to TypeScript, 5 redeemed ───
+
+  const buyer = cohortStudents[teamBuyerIndex];
+  const [team] = db
+    .insert(schema.teams)
+    .values({ createdAt: daysAgo(teamBoughtAgo) })
+    .returning()
+    .all();
+  db.insert(schema.teamMembers)
+    .values({
+      teamId: team.id,
+      userId: buyer.id,
+      role: TeamMemberRole.Admin,
+      createdAt: daysAgo(teamBoughtAgo),
+    })
+    .run();
+
+  const seats = 8;
+  const [teamPurchase] = db
+    .insert(schema.purchases)
+    .values({
+      userId: buyer.id,
+      courseId: c1.id,
+      amountPaid: c1.price * seats,
+      country: "DE",
+      createdAt: daysAgo(teamBoughtAgo),
+    })
+    .returning()
+    .all();
+  purchaseCount++;
+
+  const teamCoupons = db
+    .insert(schema.coupons)
+    .values(
+      Array.from({ length: seats }, (_, s) => ({
+        teamId: team.id,
+        courseId: c1.id,
+        code: `TEAM-TS-SEAT${String(s + 1).padStart(2, "0")}`,
+        purchaseId: teamPurchase.id,
+        createdAt: daysAgo(teamBoughtAgo),
+      }))
+    )
+    .returning()
+    .all();
+
+  const redeemers = cohortStudents.slice(teamBuyerIndex + 1);
+  redeemers.forEach((student, r) => {
+    const redeemedAgo = teamBoughtAgo - 2 - r * 3;
+    db.update(schema.coupons)
+      .set({ redeemedByUserId: student.id, redeemedAt: daysAgo(redeemedAgo) })
+      .where(eq(schema.coupons.id, teamCoupons[r].id))
+      .run();
+    enroll(student.id, c1, redeemedAgo);
+  });
+
+  // ─── Staff enrollments ───
+  // Analytics must ignore these: the instructor testing their own course and
+  // an admin poking around.
+
+  db.insert(schema.enrollments)
+    .values([
+      { userId: opts.instructor1.id, courseId: c1.id, enrolledAt: daysAgo(370) },
+      { userId: opts.admin.id, courseId: c2.id, enrolledAt: daysAgo(200) },
+    ])
+    .run();
+  enrollmentCount += 2;
+  const staffProgress: [number, number][] = [
+    [opts.instructor1.id, c1.lessonIds[0]],
+    [opts.instructor1.id, c1.lessonIds[1]],
+    [opts.admin.id, c2.lessonIds[0]],
+  ];
+  for (const [userId, lessonId] of staffProgress) {
+    db.insert(schema.lessonProgress)
+      .values({
+        userId,
+        lessonId,
+        status: LessonProgressStatus.Completed,
+        completedAt: daysAgo(150),
+      })
+      .run();
+  }
+
+  console.log(
+    `Created analytics cohort: ${cohortStudents.length} students, ${purchaseCount} purchases (incl. 1 team purchase with ${seats} seats, ${redeemers.length} redeemed), ${enrollmentCount} enrollments, ${ratingCount} ratings, 1 archived and 1 draft course.`
+  );
+
+  return {
+    students: cohortStudents.length,
+    purchases: purchaseCount,
+    enrollments: enrollmentCount,
+    ratings: ratingCount,
+  };
+}
+
+function insertCourseWithLessons(opts: {
+  title: string;
+  description: string;
+  instructorId: number;
+  categoryId: number;
+  status: CourseStatus;
+  price: number;
+  createdAgo: number;
+  updatedAgo: number;
+  lessons: string[];
+}) {
+  const [course] = db
+    .insert(schema.courses)
+    .values({
+      title: opts.title,
+      slug: slugify(opts.title),
+      description: opts.description,
+      salesCopy: `## ${opts.title}\n\n${opts.description}`,
+      instructorId: opts.instructorId,
+      categoryId: opts.categoryId,
+      status: opts.status,
+      price: opts.price,
+      createdAt: daysAgo(opts.createdAgo),
+      updatedAt: daysAgo(opts.updatedAgo),
+    })
+    .returning()
+    .all();
+
+  const [mod] = db
+    .insert(schema.modules)
+    .values({
+      courseId: course.id,
+      title: "Core Lessons",
+      position: 1,
+      createdAt: daysAgo(opts.createdAgo),
+    })
+    .returning()
+    .all();
+
+  const lessonIds = opts.lessons.map((title, i) => {
+    const [lesson] = db
+      .insert(schema.lessons)
+      .values({
+        moduleId: mod.id,
+        title,
+        content: `# ${title}\n\nLesson content for ${title}.`,
+        position: i + 1,
+        durationMinutes: 10 + i * 2,
+        createdAt: daysAgo(opts.createdAgo),
+      })
+      .returning()
+      .all();
+    return lesson.id;
+  });
+
+  return { course, lessonIds };
 }
 
 seed().catch(console.error);
