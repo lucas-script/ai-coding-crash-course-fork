@@ -1,7 +1,19 @@
 import { and, count, eq, gt, inArray, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { db } from "~/db";
-import { CourseStatus, UserRole, courses, enrollments, purchases, users } from "~/db/schema";
+import {
+  CourseStatus,
+  LessonProgressStatus,
+  UserRole,
+  courseRatings,
+  courses,
+  enrollments,
+  lessonProgress,
+  lessons,
+  modules,
+  purchases,
+  users,
+} from "~/db/schema";
 import {
   getGranularity,
   getPreviousWindow,
@@ -157,5 +169,95 @@ export function getInstructorOverview(
     totals: totalsIn(window),
     previous: previousWindow ? totalsIn(previousWindow) : null,
     series: seriesFor(courseFilter, range, now),
+  };
+}
+
+// ─── Per-course analytics ───
+
+/** SQL condition selecting one course (by id); pair with `courses`-joined helpers. */
+function singleCourse(courseId: number): SQL {
+  return eq(courses.id, courseId);
+}
+
+/** Gross revenue (cents) for one course within a window. */
+function courseRevenueInWindow(courseId: number, window: Window): number {
+  const row = db
+    .select({ revenue: sql<number>`coalesce(sum(${purchases.amountPaid}), 0)` })
+    .from(purchases)
+    .where(and(eq(purchases.courseId, courseId), inWindow(purchases.createdAt, window)))
+    .get();
+  return row?.revenue ?? 0;
+}
+
+/** All-time engagement for one course. Rates are 0–1, null with no counted enrollments. */
+export type CourseEngagement = {
+  completionRate: number | null;
+  activationRate: number | null;
+  /** Average stars (1–5), null with no ratings. */
+  rating: number | null;
+};
+
+/** SQL: the enrollment's user has started or completed a lesson in its course. */
+function enrollmentActivated(): SQL {
+  return sql`exists (
+    select 1 from ${lessonProgress}
+    inner join ${lessons} on ${lessons.id} = ${lessonProgress.lessonId}
+    inner join ${modules} on ${modules.id} = ${lessons.moduleId}
+    where ${lessonProgress.userId} = ${enrollments.userId}
+      and ${modules.courseId} = ${enrollments.courseId}
+      and ${lessonProgress.status} in (${LessonProgressStatus.InProgress}, ${LessonProgressStatus.Completed})
+  )`;
+}
+
+/**
+ * All-time completion, activation, and average rating for one course. Rates
+ * are over counted enrollments (instructor and admins excluded). Exported so
+ * the overview's per-course rows and averages can reuse it.
+ */
+export function getCourseEngagement(courseId: number): CourseEngagement {
+  const row = db
+    .select({
+      total: sql<number>`count(*)`,
+      completed: sql<number>`count(${enrollments.completedAt})`,
+      activated: sql<number>`coalesce(sum(case when ${enrollmentActivated()} then 1 else 0 end), 0)`,
+    })
+    .from(enrollments)
+    .innerJoin(courses, eq(enrollments.courseId, courses.id))
+    .innerJoin(users, eq(enrollments.userId, users.id))
+    .where(and(singleCourse(courseId), countedEnrollment))
+    .get();
+  const total = row?.total ?? 0;
+  const ratingRow = db
+    .select({ rating: sql<number | null>`avg(${courseRatings.rating})` })
+    .from(courseRatings)
+    .where(eq(courseRatings.courseId, courseId))
+    .get();
+  return {
+    completionRate: total ? (row?.completed ?? 0) / total : null,
+    activationRate: total ? (row?.activated ?? 0) / total : null,
+    rating: ratingRow?.rating ?? null,
+  };
+}
+
+export type CourseAnalytics = {
+  totals: OverviewTotals & CourseEngagement;
+  /** Revenue and enrollments for the preceding equal-length window; null for "all". */
+  previous: OverviewTotals | null;
+};
+
+/**
+ * Analytics for one course. Revenue and enrollments cover `range` ending at
+ * `now`; completion, activation, and rating are all-time.
+ */
+export function getCourseAnalytics(courseId: number, range: Range, now: Date): CourseAnalytics {
+  const window = getRangeWindow(range, now);
+  const previousWindow = getPreviousWindow(range, now);
+  const windowed = (w: Window): OverviewTotals => ({
+    revenue: courseRevenueInWindow(courseId, w),
+    enrollments: enrollmentsInWindow(singleCourse(courseId), w),
+  });
+  return {
+    totals: { ...windowed(window), ...getCourseEngagement(courseId) },
+    previous: previousWindow ? windowed(previousWindow) : null,
   };
 }
