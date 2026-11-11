@@ -11,6 +11,8 @@ import { AlertTriangle, BookOpen, GraduationCap, Plus, Users } from "lucide-reac
 import { CourseImage } from "~/components/course-image";
 import { data, isRouteErrorResponse } from "react-router";
 import { CourseStatus, UserRole } from "~/db/schema";
+import { getInstructorOverview, parseRange } from "~/services/analyticsService";
+import { InstructorOverviewPanel } from "~/components/analytics/instructor-overview";
 
 export function meta() {
   return [
@@ -56,7 +58,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     };
   });
 
-  return { courses: coursesWithStats };
+  const range = parseRange(new URL(request.url).searchParams.get("range"));
+  const overview = getInstructorOverview(currentUserId, range, new Date());
+
+  return { courses: coursesWithStats, overview, range };
 }
 
 function statusBadge(status: string) {
@@ -121,7 +126,7 @@ export function HydrateFallback() {
 export default function InstructorDashboard({
   loaderData,
 }: Route.ComponentProps) {
-  const { courses } = loaderData;
+  const { courses, overview, range } = loaderData;
 
   return (
     <div className="mx-auto max-w-7xl p-6 lg:p-8">
@@ -148,6 +153,8 @@ export default function InstructorDashboard({
           </Button>
         </Link>
       </div>
+
+      <InstructorOverviewPanel overview={overview} range={range} />
 
       {courses.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-16 text-center">
